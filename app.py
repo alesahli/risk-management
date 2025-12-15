@@ -26,22 +26,49 @@ def get_market_data(tickers, start_date, end_date):
     if not tickers: return pd.DataFrame()
     try:
         s_date = pd.to_datetime(start_date) - timedelta(days=10)
-        # Otimização: auto_adjust=False para garantir controle sobre Close/Adj Close
-        df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=False)
+        
+        # CORREÇÃO: threads=False evita o travamento no Streamlit Cloud
+        df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=False, threads=False)
+        
         if df.empty: return pd.DataFrame()
         
-        # Tratamento para diferentes formatos de retorno do yfinance
-        if 'Adj Close' in df.columns: data = df['Adj Close']
-        elif 'Close' in df.columns: data = df['Close']
-        else: data = df
+        # Tratamento robusto para MultiIndex (nova versão yfinance) ou Index Simples
+        data = pd.DataFrame()
+        
+        # Verifica se é MultiIndex (vários ativos)
+        if isinstance(df.columns, pd.MultiIndex):
+            # Tenta extrair 'Adj Close' no nível 0 ou 1
+            if 'Adj Close' in df.columns.get_level_values(0):
+                data = df.xs('Adj Close', axis=1, level=0)
+            elif 'Close' in df.columns.get_level_values(0):
+                data = df.xs('Close', axis=1, level=0)
+            # Tenta verificar se os níveis estão invertidos (Ticker no nível 0, Price Type no 1)
+            elif 'Adj Close' in df.columns.get_level_values(1):
+                data = df.xs('Adj Close', axis=1, level=1)
+            elif 'Close' in df.columns.get_level_values(1):
+                data = df.xs('Close', axis=1, level=1)
+            else:
+                # Fallback: tenta pegar a primeira coluna de cada par
+                data = df.iloc[:, 0] 
+        else:
+            # Estrutura simples (um ativo ou colunas flat)
+            if 'Adj Close' in df.columns: data = df['Adj Close']
+            elif 'Close' in df.columns: data = df['Close']
+            else: data = df
 
+        # Garante que seja DataFrame
         if isinstance(data, pd.Series):
             data = data.to_frame()
-            data.columns = tickers
+            if len(tickers) == 1:
+                data.columns = tickers
+        
+        # Remove fuso horário para evitar erros de comparação
+        data.index = data.index.tz_localize(None)
         
         data = data[data.index >= pd.to_datetime(start_date)]
         return data.dropna()
-    except: return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     """Calcula todas as métricas de risco e retorno."""
@@ -168,7 +195,7 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
 
     return pd.Series(portfolio_rets, index=dates)
 
-# --- FUNÇÃO ATUALIZADA (SOLVER FIX) ---
+# --- FUNÇÃO SOLVER ---
 def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0, target_semidev_val=None):
     """
     Roda o otimizador com limite de iterações aumentado e chute inicial inteligente.
@@ -389,36 +416,59 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
         s_start, s_end = "2021-06-01", "2022-07-25"
         period_start, period_end = "2021-06-08", "2022-07-18"
 
-    # 1. Baixar Benchmark separadamente
+    # 1. Baixar Benchmark separadamente com CORREÇÃO DE THREADS
     try:
-        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=False)
+        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
         if not df_bench_stress.empty:
-            if 'Adj Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Adj Close']
-            elif 'Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Close']
+            # Tratamento simplificado para benchmark
+            if isinstance(df_bench_stress.columns, pd.MultiIndex):
+                if 'Adj Close' in df_bench_stress.columns.get_level_values(0):
+                    df_bench_stress = df_bench_stress['Adj Close']
+                elif 'Close' in df_bench_stress.columns.get_level_values(0):
+                    df_bench_stress = df_bench_stress['Close']
+                else:
+                    df_bench_stress = df_bench_stress.iloc[:, 0]
+            else:
+                if 'Adj Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Adj Close']
+                elif 'Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Close']
             
+            # Garante Série
             if isinstance(df_bench_stress, pd.DataFrame):
                 df_bench_stress = df_bench_stress.iloc[:, 0] 
+                
+            df_bench_stress.index = df_bench_stress.index.tz_localize(None)
     except:
         df_bench_stress = pd.Series()
 
-    # 2. Baixar Ativos (Permitindo dados faltantes)
+    # 2. Baixar Ativos com CORREÇÃO DE THREADS
     df_assets_stress = pd.DataFrame()
     if tickers_input:
         try:
-            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=False)
+            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
             if not raw_assets.empty:
-                if 'Adj Close' in raw_assets.columns: df_assets_stress = raw_assets['Adj Close']
-                elif 'Close' in raw_assets.columns: df_assets_stress = raw_assets['Close']
-                else: df_assets_stress = raw_assets 
+                # Tratamento simplificado para ativos
+                if isinstance(raw_assets.columns, pd.MultiIndex):
+                    if 'Adj Close' in raw_assets.columns.get_level_values(0):
+                         df_assets_stress = raw_assets.xs('Adj Close', axis=1, level=0)
+                    elif 'Close' in raw_assets.columns.get_level_values(0):
+                         df_assets_stress = raw_assets.xs('Close', axis=1, level=0)
+                    else:
+                         df_assets_stress = raw_assets.iloc[:, 0]
+                else:
+                    if 'Adj Close' in raw_assets.columns: df_assets_stress = raw_assets['Adj Close']
+                    elif 'Close' in raw_assets.columns: df_assets_stress = raw_assets['Close']
+                    else: df_assets_stress = raw_assets
                 
                 if isinstance(df_assets_stress, pd.Series):
                     df_assets_stress = df_assets_stress.to_frame(name=tickers_input[0])
+                
+                df_assets_stress.index = df_assets_stress.index.tz_localize(None)
         except:
             pass
 
     # Lógica de Cálculo
     if not df_bench_stress.empty:
-        mask_b = (df_bench_stress.index >= period_start) & (df_bench_stress.index <= period_end)
+        mask_b = (df_bench_stress.index >= pd.to_datetime(period_start)) & (df_bench_stress.index <= pd.to_datetime(period_end))
         bench_cut = df_bench_stress.loc[mask_b]
         
         if not bench_cut.empty:
@@ -434,7 +484,7 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
                 has_data = False
                 
                 if t in df_assets_stress.columns:
-                    mask_a = (df_assets_stress.index >= period_start) & (df_assets_stress.index <= period_end)
+                    mask_a = (df_assets_stress.index >= pd.to_datetime(period_start)) & (df_assets_stress.index <= pd.to_datetime(period_end))
                     s_asset = df_assets_stress.loc[mask_a, t].dropna()
                     
                     if not s_asset.empty:
