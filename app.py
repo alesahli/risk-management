@@ -23,47 +23,57 @@ st.set_page_config(
 @st.cache_data
 def get_market_data(tickers, start_date, end_date):
     """
-    Baixa dados com buffer de segurança para não perder o primeiro dia de retorno.
-    Retorna o dataframe bruto (com buffer), o corte será feito depois.
+    Baixa dados do Yahoo Finance com tratamento robusto e ajuste de proventos.
     """
     if not tickers: return pd.DataFrame()
     try:
-        # CORREÇÃO 1: Buffer de 60 dias para garantir dados anteriores ao start_date
-        s_date_buffer = pd.to_datetime(start_date) - timedelta(days=60)
+        # Buffer de dias para garantir que o cálculo de retorno comece exatamente na data pedida
+        s_date = pd.to_datetime(start_date) - timedelta(days=20)
         
-        # auto_adjust=True já traz o preço descontado de dividendos/splits
-        df = yf.download(tickers, start=s_date_buffer, end=end_date, progress=False, auto_adjust=True, threads=False)
+        # CORREÇÃO CRÍTICA 1: auto_adjust=True
+        # Garante que o preço já venha descontado de dividendos e splits.
+        # threads=False previne erros no Streamlit Cloud.
+        df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=True, threads=False)
         
         if df.empty: return pd.DataFrame()
         
         data = pd.DataFrame()
         
-        # Tratamento de MultiIndex do Yfinance
+        # --- Lógica de Extração da Coluna 'Close' ---
+        # O yfinance muda o formato dependendo da versão e qtd de ativos. Isso padroniza:
         if isinstance(df.columns, pd.MultiIndex):
+            # Prioridade: Coluna 'Close' no nível superior (formato novo yfinance)
             if 'Close' in df.columns:
                 data = df['Close']
+            # Formatos antigos/alternativos
             elif 'Close' in df.columns.get_level_values(0):
                 data = df.xs('Close', axis=1, level=0)
             elif 'Close' in df.columns.get_level_values(1):
                 data = df.xs('Close', axis=1, level=1)
             else:
+                # Fallback extremo: pega a primeira coluna de cada ativo
                 data = df.iloc[:, 0] 
         else:
+            # Apenas 1 ativo ou estrutura flat
             if 'Close' in df.columns:
                 data = df[['Close']]
             else:
                 data = df.iloc[:, [0]]
 
+        # Garante DataFrame e nomes de colunas corretos
         if isinstance(data, pd.Series):
             data = data.to_frame()
         
         if len(tickers) == 1 and data.shape[1] == 1:
             data.columns = tickers
         
-        # Remove fuso horário
+        # Limpeza de Fuso Horário e Filtro de Data
         data.index = data.index.tz_localize(None)
         
-        # Remove colunas vazias (ativos que falharam), mas mantém as linhas do buffer
+        # Filtra para iniciar exatamente na data pedida pelo usuário
+        data = data[data.index >= pd.to_datetime(start_date)]
+        
+        # Remove colunas inteiramente vazias, mas NÃO remove linhas ainda (para não perder dados desalinhados)
         data = data.dropna(axis=1, how='all')
         
         return data
@@ -74,9 +84,9 @@ def get_market_data(tickers, start_date, end_date):
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     """
     Calcula métricas de risco e retorno.
-    CORREÇÃO 2: Só anualiza se houver histórico suficiente.
+    CORREÇÃO 2: Distingue 'Retorno Total' (o que aconteceu) de 'Retorno Anual' (projeção).
     """
-    # Remove NaNs apenas para o cálculo estatístico
+    # Remove NaNs apenas para o ativo específico sendo calculado neste momento
     returns = returns.dropna()
     
     if returns.empty: return {}
@@ -84,15 +94,16 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     rf_daily = (1 + rf_annual/100)**(1/252) - 1
     days = len(returns)
     
-    # 1. Retorno Total do Período (Acumulado Real)
+    # --- CÁLCULOS DE RETORNO ---
+    # 1. Retorno Total do Período (Acumulado): É o valor exato que variou entre data X e Y.
     total_return = (1 + returns).prod() - 1
     
-    # 2. Retorno Anualizado (CAGR)
-    # Regra: Se tiver menos de 126 dias (aprox 6 meses), NÃO anualiza para evitar distorções.
-    if days > 126:
+    # 2. Retorno Anualizado (CAGR): É a projeção desse ritmo para 1 ano (252 dias úteis).
+    # Se o período for curto (ex: 1 mês), isso vai inflar o número (ex: 3% vira 40% a.a.).
+    if days > 10:
         ann_return = (1 + total_return)**(252 / days) - 1
     else:
-        ann_return = total_return # Mantém o retorno total
+        ann_return = total_return # Para períodos muito curtos, mantém o total para não distorcer
     
     ann_vol = returns.std() * np.sqrt(252)
     
@@ -112,6 +123,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     
     beta = 0.0
     if benchmark_returns is not None:
+        # Alinha as séries apenas onde ambas existem
         aligned = pd.concat([returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
@@ -119,8 +131,8 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
             beta = cov / var_bench if var_bench != 0 else 0
             
     return {
-        "Retorno do Período": total_return,
-        "Retorno Anualizado": ann_return,
+        "Retorno do Período": total_return, # O valor real acumulado (ex: 11%)
+        "Retorno Anualizado": ann_return,   # O valor projetado anual (ex: 40%)
         "Volatilidade": ann_vol,
         "Semi-Desvio": semi_dev,
         "Beta": beta,
@@ -146,6 +158,7 @@ def calculate_capture_ratios(asset_ret, bench_ret):
     return up_cap * 100.0, down_cap * 100.0
 
 def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annual, fee_annual, rebal_freq):
+    """Calcula a carteira dia a dia, tratando dados faltantes (NaN) como retorno zero."""
     rf_daily = (1 + rf_annual/100)**(1/252) - 1
     fee_daily = (1 + fee_annual/100)**(1/252) - 1
     
@@ -155,6 +168,7 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     
     # 1. Rebalanceamento Diário (Peso Constante)
     if rebal_freq == 'Diário':
+        # fillna(0) impede que a carteira quebre se 1 ativo não tiver cotação no dia
         gross_ret = asset_returns.fillna(0).dot(initial_weights) + (rf_daily * w_cash_initial)
         return gross_ret - fee_daily
 
@@ -179,6 +193,7 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     current_cash_w = w_cash_initial
     
     portfolio_rets = []
+    # Preenche NaNs com 0.0 para cálculo vetorial (dia sem pregão pro ativo não muda o valor financeiro dele)
     returns_arr = asset_returns.fillna(0.0).values
     dates = asset_returns.index
     n_days = len(dates)
@@ -304,20 +319,14 @@ if tickers_input:
 all_tickers = list(set(tickers_input + [bench_ticker]))
 
 with st.spinner("Fetching market data..."):
-    # CORREÇÃO 3: Baixamos dados com buffer para não perder o primeiro dia
-    df_prices_raw = get_market_data(all_tickers, start_date, end_date)
+    df_prices = get_market_data(all_tickers, start_date, end_date)
 
-if df_prices_raw.empty: st.error("No data found."); st.stop()
+if df_prices.empty: st.error("No data found."); st.stop()
 
-# 1. Calcula o retorno diário sobre TODO o histórico baixado (incluindo o buffer)
-df_ret_raw = df_prices_raw.ffill().pct_change()
-
-# 2. Agora cortamos exatamente na data que o usuário pediu
-# Isso garante que a primeira linha (start_date) tenha valor, pois foi calculada contra o dia anterior do buffer
-df_ret = df_ret_raw[df_ret_raw.index >= pd.to_datetime(start_date)]
-
-# Verifica se o corte não deixou o dataframe vazio
-if df_ret.empty: st.error("No trading data available in the selected date range."); st.stop()
+# CORREÇÃO: Não usar dropna() globalmente para não cortar ativos com históricos diferentes
+df_ret = df_prices.ffill().pct_change()
+# Remove apenas a primeira linha que é sempre NaN devido ao pct_change
+df_ret = df_ret.iloc[1:]
 
 if bench_ticker in df_ret.columns: bench_ret = df_ret[bench_ticker]
 else: bench_ret = pd.Series(0, index=df_ret.index)
@@ -338,7 +347,7 @@ for t in valid_assets:
     asset_stats[t] = {
         "Beta": m.get("Beta", 1.0), "UpCapture": up, "DownCapture": down, 
         "Vol": m["Volatilidade"], "SemiDev": m["Semi-Desvio"], 
-        "Ret": m["Retorno Anualizado"] 
+        "Ret": m["Retorno Anualizado"] # Usa anualizado para o gráfico Scatter
     }
 
 # ==============================================================================
@@ -355,6 +364,7 @@ col_kpi, col_delta = st.columns([3, 1])
 with col_kpi:
     st.markdown(f"#### Performance Metrics (Simulated Rebal: {rebal_freq_sim})")
     
+    # Ordem das métricas para exibir na tabela
     metrics_order = [
         "Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio", 
         "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"
@@ -365,7 +375,7 @@ with col_kpi:
     df_comp = pd.DataFrame({
         "Metric": keys_present, 
         "Current (Fixed W)": [m_orig[k] for k in keys_present], 
-        "Simulated ({rebal_freq_sim})": [m_sim[k] for k in keys_present], 
+        f"Simulated ({rebal_freq_sim})": [m_sim[k] for k in keys_present], 
         "Benchmark": [m_bench.get(k, 0) for k in keys_present]
     })
     
@@ -382,15 +392,12 @@ with col_kpi:
 
 with col_delta:
     st.markdown("##### Performance Delta")
+    # Agora destaca o Retorno do Período (o real)
     d_ret = m_sim["Retorno do Período"] - m_orig["Retorno do Período"]
     d_beta = m_sim["Beta"] - m_orig["Beta"]
     
     st.metric("Total Period Return", f"{m_sim['Retorno do Período']:.2%}", delta=f"{d_ret:.2%}")
-    
-    # Tooltip para explicar a anualização
-    help_text = "Taxa anual projetada (CAGR). Para períodos < 6 meses, exibe o Retorno Total para evitar distorções."
-    st.metric("Annualized Return", f"{m_sim['Retorno Anualizado']:.2%}", help=help_text)
-    
+    st.metric("Annualized Return", f"{m_sim['Retorno Anualizado']:.2%}", help="Taxa anual projetada (CAGR).")
     st.metric("Portfolio Beta", f"{m_sim['Beta']:.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
 # --- BLOCO B: STRESS TEST ---
@@ -404,7 +411,7 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
         s_start, s_end = "2021-06-01", "2022-07-25"
         period_start, period_end = "2021-06-08", "2022-07-18"
 
-    # Download dedicado para Stress Test
+    # Download dedicado para Stress Test (com auto_adjust=True)
     try:
         df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
         if not df_bench_stress.empty:
@@ -486,7 +493,7 @@ with tab1:
     risk_mode = st.radio("Risk Metric (X-Axis):", ["Total Volatility", "Downside Deviation"], horizontal=True)
     x_key = "Vol" if risk_mode == "Total Volatility" else "SemiDev"
     scatter_data = []
-    
+    # Usa Retorno ANUALIZADO para o gráfico scatter ser comparável com Vol Anualizada
     for t, s in asset_stats.items(): scatter_data.append({"Label": t, "X": s[x_key], "Y": s["Ret"], "Type": "Asset", "Size": 8})
     scatter_data.append({"Label": "CURRENT", "X": m_orig["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_orig["Retorno Anualizado"], "Type": "Current Portfolio", "Size": 20})
     scatter_data.append({"Label": "SIMULATED", "X": m_sim["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_sim["Retorno Anualizado"], "Type": "Simulated Portfolio", "Size": 20})
