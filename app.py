@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from scipy.optimize import minimize
+import io
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -27,10 +28,7 @@ def get_market_data(tickers, start_date, end_date):
     """
     if not tickers: return pd.DataFrame()
     try:
-        # Buffer de dias para cálculo de retorno
         s_date = pd.to_datetime(start_date) - timedelta(days=20)
-        
-        # auto_adjust=True para retornos reais (dividendos/splits)
         df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=True, threads=False)
         
         if df.empty: return pd.DataFrame()
@@ -39,30 +37,19 @@ def get_market_data(tickers, start_date, end_date):
         
         # Lógica de Extração da Coluna 'Close'
         if isinstance(df.columns, pd.MultiIndex):
-            if 'Close' in df.columns:
-                data = df['Close']
-            elif 'Close' in df.columns.get_level_values(0):
-                data = df.xs('Close', axis=1, level=0)
-            elif 'Close' in df.columns.get_level_values(1):
-                data = df.xs('Close', axis=1, level=1)
-            else:
-                data = df.iloc[:, 0] 
+            if 'Close' in df.columns: data = df['Close']
+            elif 'Close' in df.columns.get_level_values(0): data = df.xs('Close', axis=1, level=0)
+            elif 'Close' in df.columns.get_level_values(1): data = df.xs('Close', axis=1, level=1)
+            else: data = df.iloc[:, 0] 
         else:
-            if 'Close' in df.columns:
-                data = df[['Close']]
-            else:
-                data = df.iloc[:, [0]]
+            if 'Close' in df.columns: data = df[['Close']]
+            else: data = df.iloc[:, [0]]
 
-        if isinstance(data, pd.Series):
-            data = data.to_frame()
-        
-        if len(tickers) == 1 and data.shape[1] == 1:
-            data.columns = tickers
+        if isinstance(data, pd.Series): data = data.to_frame()
+        if len(tickers) == 1 and data.shape[1] == 1: data.columns = tickers
         
         data.index = data.index.tz_localize(None)
         data = data[data.index >= pd.to_datetime(start_date)]
-        
-        # Remove colunas vazias, mas mantém linhas para alinhamento temporal
         data = data.dropna(axis=1, how='all')
         
         return data
@@ -71,28 +58,17 @@ def get_market_data(tickers, start_date, end_date):
         return pd.DataFrame()
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
-    """
-    Calcula métricas de risco e retorno.
-    """
-    # Remove NaNs apenas para o cálculo estatístico final
     returns = returns.dropna()
-    
     if returns.empty: return {}
     
     rf_daily = (1 + rf_annual/100)**(1/252) - 1
     days = len(returns)
     
-    # Retorno Total (Acumulado Real)
     total_return = (1 + returns).prod() - 1
-    
-    # Retorno Anualizado (CAGR)
-    if days > 10:
-        ann_return = (1 + total_return)**(252 / days) - 1
-    else:
-        ann_return = total_return
+    if days > 10: ann_return = (1 + total_return)**(252 / days) - 1
+    else: ann_return = total_return
     
     ann_vol = returns.std() * np.sqrt(252)
-    
     neg_ret = returns[returns < 0]
     semi_dev = neg_ret.std() * np.sqrt(252)
     
@@ -103,7 +79,6 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     cum = (1 + returns).cumprod()
     dd = (cum - cum.cummax()) / cum.cummax()
     max_dd = dd.min()
-    
     var_95 = np.percentile(returns, 5)
     cvar_95 = returns[returns <= var_95].mean()
     
@@ -116,53 +91,33 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
             beta = cov / var_bench if var_bench != 0 else 0
             
     return {
-        "Retorno do Período": total_return,
-        "Retorno Anualizado": ann_return,
-        "Volatilidade": ann_vol,
-        "Semi-Desvio": semi_dev,
-        "Beta": beta,
-        "Sharpe": sharpe,
-        "Sortino": sortino,
-        "Max Drawdown": max_dd,
-        "VaR 95%": var_95,
-        "CVaR 95%": cvar_95
+        "Retorno do Período": total_return, "Retorno Anualizado": ann_return,
+        "Volatilidade": ann_vol, "Semi-Desvio": semi_dev, "Beta": beta,
+        "Sharpe": sharpe, "Sortino": sortino, "Max Drawdown": max_dd,
+        "VaR 95%": var_95, "CVaR 95%": cvar_95
     }
 
 def calculate_capture_ratios(asset_ret, bench_ret):
     aligned = pd.concat([asset_ret, bench_ret], axis=1, join='inner').dropna()
     if aligned.empty: return 0.0, 0.0
-    r_asset = aligned.iloc[:, 0]
-    r_bench = aligned.iloc[:, 1]
-    
+    r_asset = aligned.iloc[:, 0]; r_bench = aligned.iloc[:, 1]
     up_mask = r_bench > 0
     up_cap = r_asset[up_mask].mean() / r_bench[up_mask].mean() if up_mask.sum() > 0 else 0
-    
     down_mask = r_bench < 0
     down_cap = r_asset[down_mask].mean() / r_bench[down_mask].mean() if down_mask.sum() > 0 else 0
-    
     return up_cap * 100.0, down_cap * 100.0
 
 def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annual, fee_annual, rebal_freq):
-    """
-    Calcula a carteira.
-    CORREÇÃO: Garante que 'Diário' trate NaNs (fillna(0)) igual ao Solver.
-    """
     rf_daily = (1 + rf_annual/100)**(1/252) - 1
     fee_daily = (1 + fee_annual/100)**(1/252) - 1
-    
     tickers = asset_returns.columns.tolist()
     initial_weights = np.array([weights_dict.get(t, 0) for t in tickers]) / 100.0
     w_cash_initial = cash_pct / 100.0
     
-    # 1. Rebalanceamento Diário (Peso Constante)
     if rebal_freq == 'Diário':
-        # CORREÇÃO: fillna(0) é essencial aqui.
-        # Se um ativo não tem negociação no dia, o peso dele continua lá, mas retorno é 0.
-        # Sem isso, o produto escalar (.dot) resultaria em NaN para a linha toda.
         gross_ret = asset_returns.fillna(0.0).dot(initial_weights) + (rf_daily * w_cash_initial)
         return gross_ret - fee_daily
 
-    # 2. Rebalanceamento Periódico (Com Drift)
     rebal_dates = set()
     if rebal_freq != 'Sem Rebalanceamento':
         try:
@@ -171,7 +126,6 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
             elif rebal_freq == 'Anual': resample_code = 'YE'
             elif rebal_freq == 'Semestral': resample_code = 'QE' 
             else: resample_code = 'QE' 
-            
             temp_resample = asset_returns.resample(resample_code).last().index
             if rebal_freq == 'Semestral': rebal_dates = set(temp_resample[1::2])
             else: rebal_dates = set(temp_resample)
@@ -181,16 +135,12 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
 
     current_weights = initial_weights.copy()
     current_cash_w = w_cash_initial
-    
     portfolio_rets = []
-    # fillna(0) aqui garante consistência também na simulação de loop
     returns_arr = asset_returns.fillna(0.0).values
     dates = asset_returns.index
-    n_days = len(dates)
     
-    for i in range(n_days):
+    for i in range(len(dates)):
         r_assets = returns_arr[i]
-        
         day_ret = np.sum(current_weights * r_assets) + (current_cash_w * rf_daily)
         net_day_ret = day_ret - fee_daily
         portfolio_rets.append(net_day_ret)
@@ -201,12 +151,10 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
             current_cash_w = current_cash_w * (1 + rf_daily) / denominator
         
         if dates[i] in rebal_dates:
-            current_weights = initial_weights.copy()
-            current_cash_w = w_cash_initial
+            current_weights = initial_weights.copy(); current_cash_w = w_cash_initial
 
     return pd.Series(portfolio_rets, index=dates)
 
-# --- FUNÇÃO SOLVER ---
 def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0, target_semidev_val=None):
     rf_daily = (1 + rf_annual/100)**(1/252) - 1
     fee_daily = (1 + mgmt_fee_annual/100)**(1/252) - 1
@@ -224,7 +172,6 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     if target_metric == "Max Return (Target Semi-Dev)" and target_semidev_val is not None:
         def semidev_constraint(weights):
             w = np.array(weights)
-            # fillna(0) para igualar lógica
             gross = df_returns.fillna(0).dot(w)
             net = gross - fee_daily
             neg = net[net < 0]
@@ -234,12 +181,9 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
 
     def objective(weights):
         w = np.array(weights)
-        # fillna(0) para igualar lógica
         gross_ret = df_returns.fillna(0).dot(w)
         net_ret = gross_ret - fee_daily
-        
         if abs(np.sum(w) - 1.0) > 0.001: return 1e5
-        
         if target_metric == "Max Sortino":
             neg_ret = net_ret[net_ret < 0]
             if neg_ret.empty or neg_ret.std() == 0: return 1e5
@@ -259,14 +203,84 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options={'maxiter': 1000})
     return result
 
+# --- FUNÇÃO DE IMPORTAÇÃO ---
+def load_portfolio_from_file(uploaded_file):
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+        
+        # Normaliza colunas
+        df.columns = [str(c).lower().strip() for c in df.columns]
+        
+        # Identifica colunas flexivelmente
+        col_ticker = next((c for c in df.columns if c in ['ativo', 'ticker', 'asset', 'symbol', 'código']), None)
+        col_weight = next((c for c in df.columns if c in ['peso', 'weight', 'alocacao', '%', 'valor']), None)
+        
+        if not col_ticker or not col_weight:
+            return None, "Colunas obrigatórias não encontradas: 'Ativo' e 'Peso'."
+        
+        portfolio = {}
+        for _, row in df.iterrows():
+            t = str(row[col_ticker]).strip().upper()
+            # Remove sufixo se necessário, mas idealmente mantém como está
+            w = float(row[col_weight])
+            # Se vier em formato decimal (0.1), converte para 10. Se vier 10, mantém.
+            # Assume que se soma <= 1.5, é decimal. Se soma > 1.5, é percentual.
+            portfolio[t] = w
+            
+        # Ajuste percentual simples na importação
+        total_w = sum(portfolio.values())
+        if total_w <= 1.05 and total_w > 0:
+             for k in portfolio: portfolio[k] = portfolio[k] * 100.0
+
+        return portfolio, None
+    except Exception as e:
+        return None, str(e)
+
 # ==============================================================================
 # 3. BARRA LATERAL (INPUTS)
 # ==============================================================================
 st.sidebar.header("Portfolio Configuration")
 
-tickers_text = st.sidebar.text_area("Asset Tickers:", value="VALE3.SA, PETR4.SA, BPAC11.SA")
+# --- BLOCO DE IMPORTAÇÃO/EXPORTAÇÃO ---
+with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
+    # Download Template
+    df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        df_template.to_excel(writer, index=False, sheet_name='Portfolio')
+    
+    st.download_button(
+        label="Download Excel Template",
+        data=buffer.getvalue(),
+        file_name="portfolio_template.xlsx",
+        mime="application/vnd.ms-excel",
+        use_container_width=True
+    )
+    
+    # Upload
+    uploaded_file = st.file_uploader("Upload Portfolio (xlsx/csv)", type=['xlsx', 'csv'])
+    if uploaded_file is not None:
+        portfolio_dict, error_msg = load_portfolio_from_file(uploaded_file)
+        if portfolio_dict:
+            # Salva no Session State para sobrescrever os inputs manuais
+            st.session_state['imported_portfolio'] = portfolio_dict
+            st.session_state['tickers_text_key'] = ", ".join(portfolio_dict.keys())
+            st.success("Portfolio Loaded Successfully!")
+        else:
+            st.error(f"Error: {error_msg}")
+
+# Lógica para definir Tickers Padrão (Manual ou Importado)
+default_tickers_text = "VALE3.SA, PETR4.SA, BPAC11.SA"
+if 'tickers_text_key' in st.session_state:
+    default_tickers_text = st.session_state['tickers_text_key']
+
+tickers_text = st.sidebar.text_area("Asset Tickers:", value=default_tickers_text, height=100)
 tickers_input = [t.strip().upper() for t in tickers_text.split(',') if t.strip()]
 
+# Seleção de Datas
 periodo_option = st.sidebar.radio("Time Horizon:", ["1 Ano", "2 Anos", "Desde 2020", "Personalizado"], horizontal=True)
 end_date = datetime.today()
 if periodo_option == "1 Ano": start_date = end_date - timedelta(days=365)
@@ -283,36 +297,51 @@ rf_input = c_rf.number_input("Risk Free (% p.a.)", value=10.5, step=0.5)
 mgmt_fee = c_fee.number_input("Mgmt Fee (% p.a.)", value=0.0, step=0.1)
 bench_ticker = st.sidebar.text_input("Benchmark Ticker", value="^BVSP")
 
-# Guarda a chave do widget no session_state para poder alterar via callback
-if 'rebal_freq_key' not in st.session_state:
-    st.session_state['rebal_freq_key'] = "Sem Rebalanceamento"
-
+if 'rebal_freq_key' not in st.session_state: st.session_state['rebal_freq_key'] = "Sem Rebalanceamento"
 st.sidebar.subheader("Rebalancing (Simulated)")
-rebal_freq_sim = st.sidebar.selectbox(
-    "Frequency:", 
-    ["Sem Rebalanceamento", "Mensal", "Trimestral", "Semestral", "Anual", "Diário"],
-    index=0,
-    key='rebal_freq_key' # Vincula ao session_state
-)
+rebal_freq_sim = st.sidebar.selectbox("Frequency:", ["Sem Rebalanceamento", "Mensal", "Trimestral", "Semestral", "Anual", "Diário"], index=0, key='rebal_freq_key')
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Allocation")
 weights_orig, weights_sim = {}, {}
 
+# Verifica se existe portfolio importado para usar os pesos
+imported_data = st.session_state.get('imported_portfolio', {})
+
 if tickers_input:
     total_orig, total_sim = 0, 0
-    def_val = float(int(100/len(tickers_input)))
+    def_val_calc = float(int(100/len(tickers_input)))
+    
+    # Cabeçalho da tabela de pesos
+    c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
+    c1.markdown("**Ticker**")
+    c2.markdown("**Curr %**")
+    c3.markdown("**Sim %**")
+
     for t in tickers_input:
         c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
         c1.text(t)
-        w_o = c2.number_input(f"o_{t}", 0.0, 100.0, def_val, step=5.0, label_visibility="collapsed")
+        
+        # Define valor padrão: Se estiver no importado usa ele, senão usa divisão igualitária
+        val_default = imported_data.get(t, def_val_calc)
+        
+        w_o = c2.number_input(f"o_{t}", 0.0, 100.0, val_default, step=5.0, label_visibility="collapsed")
+        
         key_sim = f"sim_{t}"
-        if key_sim not in st.session_state: st.session_state[key_sim] = def_val
+        if key_sim not in st.session_state: st.session_state[key_sim] = val_default
         w_s = c3.number_input(f"s_{t}", 0.0, 100.0, key=key_sim, step=5.0, label_visibility="collapsed")
+        
         weights_orig[t] = w_o; weights_sim[t] = w_s 
         total_orig += w_o; total_sim += w_s
+    
     cash_orig = 100 - total_orig; cash_sim = 100 - total_sim
     st.sidebar.info(f"Cash Position: Current {cash_orig:.0f}% | Simulated {cash_sim:.0f}%")
+    
+    # Export Button (Current Allocation)
+    if total_orig > 0:
+        df_export = pd.DataFrame(list(weights_orig.items()), columns=["Ativo", "Peso"])
+        csv_exp = df_export.to_csv(index=False).encode('utf-8')
+        st.sidebar.download_button("Export Current Portfolio (CSV)", data=csv_exp, file_name="my_portfolio.csv", mime="text/csv")
 
 # ==============================================================================
 # 4. PROCESSAMENTO E CÁLCULOS
@@ -324,7 +353,6 @@ with st.spinner("Fetching market data..."):
 
 if df_prices.empty: st.error("No data found."); st.stop()
 
-# Calcula retornos
 df_ret = df_prices.ffill().pct_change()
 df_ret = df_ret.iloc[1:]
 
@@ -336,9 +364,6 @@ assets_ret = df_ret[valid_assets]
 
 if not valid_assets: st.error("Assets not found in data."); st.stop()
 
-# Carteiras
-# ATENÇÃO: Se o usuário selecionar "Sem Rebalanceamento", o resultado SERÁ DIFERENTE do Solver.
-# Isso é esperado matematicamente (Deriva vs Pesos Fixos).
 ret_orig = calculate_flexible_portfolio(assets_ret, weights_orig, cash_orig, rf_input, mgmt_fee, rebal_freq="Diário")
 ret_sim = calculate_flexible_portfolio(assets_ret, weights_sim, cash_sim, rf_input, mgmt_fee, rebal_freq=rebal_freq_sim)
 
@@ -348,8 +373,7 @@ for t in valid_assets:
     up, down = calculate_capture_ratios(assets_ret[t], bench_ret)
     asset_stats[t] = {
         "Beta": m.get("Beta", 1.0), "UpCapture": up, "DownCapture": down, 
-        "Vol": m["Volatilidade"], "SemiDev": m["Semi-Desvio"], 
-        "Ret": m["Retorno Anualizado"]
+        "Vol": m["Volatilidade"], "SemiDev": m["Semi-Desvio"], "Ret": m["Retorno Anualizado"]
     }
 
 # ==============================================================================
@@ -365,12 +389,7 @@ m_bench = calculate_metrics(bench_ret, rf_input, bench_ret)
 col_kpi, col_delta = st.columns([3, 1])
 with col_kpi:
     st.markdown(f"#### Performance Metrics (Simulated Rebal: {rebal_freq_sim})")
-    
-    metrics_order = [
-        "Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio", 
-        "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"
-    ]
-    
+    metrics_order = ["Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio", "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"]
     keys_present = [k for k in metrics_order if k in m_orig]
     
     df_comp = pd.DataFrame({
@@ -379,26 +398,16 @@ with col_kpi:
         f"Simulated ({rebal_freq_sim})": [m_sim[k] for k in keys_present], 
         "Benchmark": [m_bench.get(k, 0) for k in keys_present]
     })
-    
     for c in df_comp.columns[1:]:
         df_comp[c] = df_comp[c].apply(lambda x: f"{x:.2%}" if abs(x)<5 and x!=0 else f"{x:.2f}")
     
-    st.dataframe(
-        df_comp.set_index("Metric").style.applymap(
-            lambda x: "background-color: #f0f2f6; font-weight: bold", 
-            subset=(["Retorno do Período"], slice(None))
-        ), 
-        use_container_width=True
-    )
-    
-    if rebal_freq_sim != "Diário":
-        st.info(f"ℹ️ Note: Simulated returns differ from Solver targets because of drift ('{rebal_freq_sim}' vs 'Fixed Weights'). Set Frequency to 'Diário' to match Solver exactly.")
+    st.dataframe(df_comp.set_index("Metric").style.applymap(lambda x: "background-color: #f0f2f6; font-weight: bold", subset=(["Retorno do Período"], slice(None))), use_container_width=True)
+    if rebal_freq_sim != "Diário": st.info(f"ℹ️ Drift active: '{rebal_freq_sim}' vs 'Fixed Weights'. Set Frequency to 'Diário' to match Solver/Fixed targets.")
 
 with col_delta:
     st.markdown("##### Performance Delta")
     d_ret = m_sim["Retorno do Período"] - m_orig["Retorno do Período"]
     d_beta = m_sim["Beta"] - m_orig["Beta"]
-    
     st.metric("Total Period Return", f"{m_sim['Retorno do Período']:.2%}", delta=f"{d_ret:.2%}")
     st.metric("Annualized Return", f"{m_sim['Retorno Anualizado']:.2%}")
     st.metric("Portfolio Beta", f"{m_sim['Beta']:.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
@@ -406,13 +415,8 @@ with col_delta:
 # --- BLOCO B: STRESS TEST ---
 with st.expander("Stress Test Scenarios (Historical)", expanded=False):
     scenario = st.radio("Select Scenario:", ["COVID-19 Crash (2020)", "Hawkish Cycle (2021-2022)"], horizontal=True)
-    
-    if scenario == "COVID-19 Crash (2020)":
-        s_start, s_end = "2020-01-20", "2020-03-30"
-        period_start, period_end = "2020-01-23", "2020-03-23"
-    else:
-        s_start, s_end = "2021-06-01", "2022-07-25"
-        period_start, period_end = "2021-06-08", "2022-07-18"
+    if scenario == "COVID-19 Crash (2020)": s_start, s_end, period_start, period_end = "2020-01-20", "2020-03-30", "2020-01-23", "2020-03-23"
+    else: s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
 
     try:
         df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
@@ -421,10 +425,8 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
                 if 'Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Close']
                 elif 'Close' in df_bench_stress.columns.get_level_values(0): df_bench_stress = df_bench_stress.xs('Close', axis=1, level=0)
                 else: df_bench_stress = df_bench_stress.iloc[:, 0]
-            elif 'Close' in df_bench_stress.columns:
-                 df_bench_stress = df_bench_stress['Close']
-            else:
-                 df_bench_stress = df_bench_stress.iloc[:, 0]
+            elif 'Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Close']
+            else: df_bench_stress = df_bench_stress.iloc[:, 0]
             if isinstance(df_bench_stress, pd.DataFrame): df_bench_stress = df_bench_stress.iloc[:, 0] 
             df_bench_stress.index = df_bench_stress.index.tz_localize(None)
     except: df_bench_stress = pd.Series()
@@ -443,7 +445,6 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
                     df_assets_stress = raw_assets[['Close']]
                     if len(tickers_input) == 1: df_assets_stress.columns = tickers_input
                 else: df_assets_stress = raw_assets
-                
                 if isinstance(df_assets_stress, pd.Series): df_assets_stress = df_assets_stress.to_frame(name=tickers_input[0])
                 df_assets_stress.index = df_assets_stress.index.tz_localize(None)
         except: pass
@@ -451,34 +452,24 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
     if not df_bench_stress.empty:
         mask_b = (df_bench_stress.index >= pd.to_datetime(period_start)) & (df_bench_stress.index <= pd.to_datetime(period_end))
         bench_cut = df_bench_stress.loc[mask_b]
-        
         if not bench_cut.empty:
             bench_res = (bench_cut.iloc[-1] / bench_cut.iloc[0]) - 1
             days_stress = (pd.to_datetime(period_end) - pd.to_datetime(period_start)).days
             fee_factor_stress = (1 + mgmt_fee/100)**(days_stress/365) - 1
-
-            perfs = {}
-            used_proxy = []
-
+            perfs, used_proxy = {}, []
             for t in tickers_input:
-                asset_return = 0.0
-                has_data = False
+                asset_return, has_data = 0.0, False
                 if t in df_assets_stress.columns:
                     mask_a = (df_assets_stress.index >= pd.to_datetime(period_start)) & (df_assets_stress.index <= pd.to_datetime(period_end))
                     s_asset = df_assets_stress.loc[mask_a, t].dropna()
-                    if not s_asset.empty:
-                        asset_return = (s_asset.iloc[-1] / s_asset.iloc[0]) - 1
-                        has_data = True
-                
+                    if not s_asset.empty: asset_return, has_data = (s_asset.iloc[-1] / s_asset.iloc[0]) - 1, True
                 if not has_data:
                     beta_proxy = asset_stats.get(t, {}).get("Beta", 1.0)
                     asset_return = beta_proxy * bench_res
                     used_proxy.append(t)
                 perfs[t] = asset_return
-
             s_orig = sum([weights_orig.get(t, 0)/100 * perfs[t] for t in tickers_input]) - fee_factor_stress
             s_sim = sum([weights_sim.get(t, 0)/100 * perfs[t] for t in tickers_input]) - fee_factor_stress
-            
             c1, c2, c3 = st.columns(3)
             c1.metric(f"Benchmark ({scenario.split()[0]})", f"{bench_res:.2%}", delta="Market Move", delta_color="inverse")
             c2.metric("Current Portfolio", f"{s_orig:.2%}", delta=f"{s_orig-bench_res:.2%} vs Bench")
@@ -499,11 +490,9 @@ with tab1:
     scatter_data.append({"Label": "CURRENT", "X": m_orig["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_orig["Retorno Anualizado"], "Type": "Current Portfolio", "Size": 20})
     scatter_data.append({"Label": "SIMULATED", "X": m_sim["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_sim["Retorno Anualizado"], "Type": "Simulated Portfolio", "Size": 20})
     scatter_data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade" if x_key=="Vol" else "Semi-Desvio",0), "Y": m_bench.get("Retorno Anualizado",0), "Type": "Benchmark", "Size": 12})
-    
     fig1 = px.scatter(pd.DataFrame(scatter_data), x="X", y="Y", color="Type", size="Size", text="Label", 
                       color_discrete_map={"Asset": "#636EFA", "Current Portfolio": "#00CC96", "Simulated Portfolio": "#FFD700", "Benchmark": "#7F7F7F"})
-    fig1.update_layout(xaxis_title=risk_mode, yaxis_title="Annualized Return")
-    fig1.update_traces(textposition='top center')
+    fig1.update_layout(xaxis_title=risk_mode, yaxis_title="Annualized Return"); fig1.update_traces(textposition='top center')
     st.plotly_chart(fig1, use_container_width=True)
 
 with tab2:
@@ -522,7 +511,6 @@ with tab3:
     c_data.append({"Label": "CURRENT", "Up": up_o, "Down": down_o, "Type": "Portfolio"})
     c_data.append({"Label": "SIMULATED", "Up": up_s, "Down": down_s, "Type": "Portfolio"})
     df_c = pd.DataFrame(c_data)
-    
     fig3 = px.scatter(df_c, x="Down", y="Up", text="Label", color="Type", color_discrete_map={"Asset": "#636EFA", "Portfolio": "#00CC96"})
     fig3.add_vline(x=100, line_dash="dash", line_color="gray"); fig3.add_hline(y=100, line_dash="dash", line_color="gray")
     st.plotly_chart(fig3, use_container_width=True)
@@ -537,57 +525,36 @@ with tab5:
     st.area_chart(dd_orig)
 
 with tab6:
-    st.markdown("### Portfolio Optimization")
-    rf_daily = (1 + rf_input/100)**(1/252) - 1
+    st.markdown("### Portfolio Optimization"); rf_daily = (1 + rf_input/100)**(1/252) - 1
     cash_series = pd.Series(rf_daily, index=assets_ret.index, name="CASH")
-    df_opt = pd.concat([assets_ret, cash_series], axis=1)
-    opt_assets = df_opt.columns.tolist()
-    
+    df_opt = pd.concat([assets_ret, cash_series], axis=1); opt_assets = df_opt.columns.tolist()
     col_setup, col_res = st.columns([1, 2])
     with col_setup:
         target_obj = st.selectbox("Objective Function:", ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)"])
         target_semidev_input = None
-        if target_obj == "Max Return (Target Semi-Dev)":
-            target_semidev_input = st.number_input("Target Downside Volatility (%)", value=5.0, step=0.5, min_value=0.1)
-        
-        default_min = [0.0] * len(opt_assets)
-        default_max = [100.0] * len(opt_assets)
-        df_constraints = pd.DataFrame({"Asset": opt_assets, "Min %": default_min, "Max %": default_max})
-        edited_df = st.data_editor(df_constraints, column_config={"Min %": st.column_config.NumberColumn(min_value=0, max_value=100), "Max %": st.column_config.NumberColumn(min_value=0, max_value=100)}, hide_index=True)
-        
+        if target_obj == "Max Return (Target Semi-Dev)": target_semidev_input = st.number_input("Target Downside Volatility (%)", value=5.0, step=0.5, min_value=0.1)
+        default_min, default_max = [0.0] * len(opt_assets), [100.0] * len(opt_assets)
+        edited_df = st.data_editor(pd.DataFrame({"Asset": opt_assets, "Min %": default_min, "Max %": default_max}), hide_index=True)
         if st.button("Run Solver", type="primary"):
             bounds = [(r["Min %"]/100.0, r["Max %"]/100.0) for i, r in edited_df.iterrows()]
-            with st.spinner("Optimizing..."):
-                res = run_solver(df_opt, rf_input, tuple(bounds), target_obj, mgmt_fee, target_semidev_input)
+            with st.spinner("Optimizing..."): res = run_solver(df_opt, rf_input, tuple(bounds), target_obj, mgmt_fee, target_semidev_input)
             st.session_state['solver_result'] = {'success': res.success, 'message': res.message, 'weights': res.x, 'opt_assets': opt_assets}
 
     with col_res:
         if 'solver_result' in st.session_state and st.session_state['solver_result']['success']:
-            res_data = st.session_state['solver_result']
-            opt_weights = res_data['weights']
-            opt_assets_saved = res_data['opt_assets']
+            res_data, opt_weights, opt_assets_saved = st.session_state['solver_result'], st.session_state['solver_result']['weights'], st.session_state['solver_result']['opt_assets']
             fee_daily = (1 + mgmt_fee/100)**(1/252) - 1
-            # APLICA A MESMA LÓGICA DE FILLNA(0) PARA IGUALAR A SIMULAÇÃO DIÁRIA
             opt_ret_series = df_opt.fillna(0.0).dot(opt_weights) - fee_daily
             m_opt = calculate_metrics(opt_ret_series, rf_input, bench_ret)
-            
             k1, k2, k3 = st.columns(3)
-            k1.metric("Optimized Annual Return", f"{m_opt['Retorno Anualizado']:.2%}")
-            k2.metric("Sortino Ratio", f"{m_opt['Sortino']:.2f}")
-            k3.metric("Downside Vol", f"{m_opt['Semi-Desvio']:.2%}")
-            
+            k1.metric("Optimized Annual Return", f"{m_opt['Retorno Anualizado']:.2%}"); k2.metric("Sortino Ratio", f"{m_opt['Sortino']:.2f}"); k3.metric("Downside Vol", f"{m_opt['Semi-Desvio']:.2%}")
             df_w = pd.DataFrame({"Asset": opt_assets_saved, "Weight": opt_weights * 100}).query("Weight > 0.01")
             c_chart, c_table = st.columns([1, 1])
             with c_chart: st.plotly_chart(px.pie(df_w, values="Weight", names="Asset", title="Allocation"), use_container_width=True)
             with c_table: st.dataframe(df_w.sort_values("Weight", ascending=False).style.format({"Weight": "{:.2f}%"}), use_container_width=True, hide_index=True)
-            
             def update_weights_callback():
-                saved_res = st.session_state['solver_result']
-                for i, asset_name in enumerate(saved_res['opt_assets']):
-                    if asset_name != "CASH": st.session_state[f"sim_{asset_name}"] = round(saved_res['weights'][i] * 100.0, 2)
-                # Tenta forçar a simulação para modo diário para alinhar com o solver (Opcional, mas recomendado)
+                for i, asset_name in enumerate(st.session_state['solver_result']['opt_assets']):
+                    if asset_name != "CASH": st.session_state[f"sim_{asset_name}"] = round(st.session_state['solver_result']['weights'][i] * 100.0, 2)
                 st.session_state['rebal_freq_key'] = "Diário" 
-
-            st.button("Apply to Simulation", on_click=update_weights_callback, help="Applies weights and sets Rebalancing to 'Diário' to match solver results.")
-        elif 'solver_result' in st.session_state:
-            st.error(f"Failed: {st.session_state['solver_result']['message']}")
+            st.button("Apply to Simulation", on_click=update_weights_callback, help="Sets Rebalancing to 'Diário' to match solver.")
+        elif 'solver_result' in st.session_state: st.error(f"Failed: {st.session_state['solver_result']['message']}")
