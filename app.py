@@ -207,49 +207,66 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
 # --- FUNÇÃO DE IMPORTAÇÃO BLINDADA ---
 def load_portfolio_from_file(uploaded_file):
     try:
-        # Tenta ler CSV
+        df = pd.DataFrame()
+        
+        # Se for CSV
         if uploaded_file.name.endswith('.csv'):
+            # TENTATIVA 1: Ponto e vírgula + utf-8-sig (Exatamente como o Template é gerado)
             try:
-                # Tenta primeiro com separador automático (python engine)
-                df = pd.read_csv(uploaded_file, sep=None, engine='python', decimal=',')
-                # Se após ler só tiver 1 coluna, provavelmente o separador estava errado (Excel BR salva com ;)
-                if df.shape[1] < 2:
-                    uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, sep=';', decimal=',')
+                df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='utf-8-sig')
             except:
-                # Fallback direto para ponto e vírgula
+                pass
+            
+            # TENTATIVA 2: Se leu tudo em 1 coluna ou falhou, tenta vírgula (formato US)
+            if df.empty or df.shape[1] < 2:
                 uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, sep=';', decimal=',')
+                try:
+                    df = pd.read_csv(uploaded_file, sep=',', decimal='.')
+                except:
+                    pass
+            
+            # TENTATIVA 3: Encoding Latin-1 (Excel antigo BR)
+            if df.empty or df.shape[1] < 2:
+                uploaded_file.seek(0)
+                try:
+                    df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='latin1')
+                except:
+                    pass
+                    
+        # Se for Excel
         else:
-            # Tenta ler Excel (XLSX)
             try:
                 df = pd.read_excel(uploaded_file)
             except ImportError:
-                return None, "O servidor não possui bibliotecas para ler Excel (.xlsx). Por favor, use o Template CSV fornecido."
+                return None, "Servidor sem suporte a .xlsx. Por favor use o Template CSV."
         
-        # Normaliza colunas
+        if df.empty:
+            return None, "Não foi possível ler o arquivo. Verifique se é um CSV válido."
+
+        # Normaliza nomes das colunas (remove espaços e põe minusculo)
         df.columns = [str(c).lower().strip() for c in df.columns]
         
-        # Identifica colunas flexivelmente
+        # Procura colunas flexivelmente
         col_ticker = next((c for c in df.columns if c in ['ativo', 'ticker', 'asset', 'symbol', 'código']), None)
         col_weight = next((c for c in df.columns if c in ['peso', 'weight', 'alocacao', '%', 'valor']), None)
         
         if not col_ticker or not col_weight:
-            return None, "Colunas obrigatórias não encontradas: 'Ativo' e 'Peso'."
+            # Debug: Mostra o que leu se der erro
+            return None, f"Colunas 'Ativo' e 'Peso' não encontradas. Colunas lidas: {list(df.columns)}"
         
         portfolio = {}
         for _, row in df.iterrows():
             t = str(row[col_ticker]).strip().upper()
-            val = str(row[col_weight]).replace(',', '.') # Garante ponto decimal
+            val_raw = str(row[col_weight]).replace(',', '.') # Garante ponto decimal
             try:
-                w = float(val)
+                w = float(val_raw)
             except:
                 w = 0.0
             
-            if w > 0: # Ignora ativos zerados
+            if w > 0: 
                 portfolio[t] = w
             
-        # Ajuste percentual simples na importação (se user colocou 0.1, vira 10)
+        # Ajuste percentual
         total_w = sum(portfolio.values())
         if total_w <= 1.05 and total_w > 0:
              for k in portfolio: portfolio[k] = portfolio[k] * 100.0
@@ -265,18 +282,18 @@ st.sidebar.header("Portfolio Configuration")
 
 # --- BLOCO DE IMPORTAÇÃO/EXPORTAÇÃO ---
 with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
-    # CRIAÇÃO DO TEMPLATE (CORRIGIDO: Sep=';' e Decimal=',')
+    # TEMPLATE CSV (Excel BR Friendly)
     df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
-    # utf-8-sig adiciona o BOM, ajudando o Excel a reconhecer a codificação correta
+    # utf-8-sig para abrir corretamente no Excel sem perder acentos (se houver)
     csv_template = df_template.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
     
     st.download_button(
-        label="Download Template (CSV - Excel Friendly)",
+        label="Download Template (CSV)",
         data=csv_template,
         file_name="portfolio_template.csv",
         mime="text/csv",
         use_container_width=True,
-        help="Arquivo CSV formatado para Excel (separador ponto-e-vírgula)."
+        help="Use este modelo. Preencha e salve."
     )
     
     # Upload
@@ -286,7 +303,7 @@ with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
         if portfolio_dict:
             st.session_state['imported_portfolio'] = portfolio_dict
             st.session_state['tickers_text_key'] = ", ".join(portfolio_dict.keys())
-            st.success("Carteira carregada! (Veja abaixo)")
+            st.success(f"Carregado: {len(portfolio_dict)} ativos.")
         else:
             st.error(f"Erro: {error_msg}")
 
@@ -328,7 +345,6 @@ imported_data = st.session_state.get('imported_portfolio', {})
 
 if tickers_input:
     total_orig, total_sim = 0, 0
-    # Calcula divisão igualitária caso não tenha dados importados
     def_val_calc = 100.0 / len(tickers_input) if len(tickers_input) > 0 else 0
     
     # Cabeçalho da tabela de pesos
@@ -341,9 +357,7 @@ if tickers_input:
         c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
         c1.text(t)
         
-        # Lógica de prioridade: 
-        # 1. Se o ativo está na lista importada, usa o peso importado.
-        # 2. Se não está na importada, usa 0 (se houve importação) ou divisão igualitária (se não houve).
+        # Prioridade: 1. Importado, 2. Divisão igualitária
         if imported_data:
             val_default = imported_data.get(t, 0.0)
         else:
