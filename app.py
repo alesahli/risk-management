@@ -29,6 +29,7 @@ def get_market_data(tickers, start_date, end_date):
     if not tickers: return pd.DataFrame()
     try:
         s_date = pd.to_datetime(start_date) - timedelta(days=20)
+        # auto_adjust=True garante retornos reais (dividendos/splits)
         df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=True, threads=False)
         
         if df.empty: return pd.DataFrame()
@@ -203,13 +204,17 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options={'maxiter': 1000})
     return result
 
-# --- FUNÇÃO DE IMPORTAÇÃO ---
+# --- FUNÇÃO DE IMPORTAÇÃO BLINDADA ---
 def load_portfolio_from_file(uploaded_file):
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         else:
-            df = pd.read_excel(uploaded_file)
+            # Tenta ler Excel. Se falhar por falta de bibliotecas, avisa o usuário.
+            try:
+                df = pd.read_excel(uploaded_file)
+            except ImportError:
+                return None, "O servidor não possui bibliotecas para ler Excel (.xlsx). Por favor, converta seu arquivo para CSV e tente novamente."
         
         # Normaliza colunas
         df.columns = [str(c).lower().strip() for c in df.columns]
@@ -224,10 +229,7 @@ def load_portfolio_from_file(uploaded_file):
         portfolio = {}
         for _, row in df.iterrows():
             t = str(row[col_ticker]).strip().upper()
-            # Remove sufixo se necessário, mas idealmente mantém como está
             w = float(row[col_weight])
-            # Se vier em formato decimal (0.1), converte para 10. Se vier 10, mantém.
-            # Assume que se soma <= 1.5, é decimal. Se soma > 1.5, é percentual.
             portfolio[t] = w
             
         # Ajuste percentual simples na importação
@@ -246,31 +248,30 @@ st.sidebar.header("Portfolio Configuration")
 
 # --- BLOCO DE IMPORTAÇÃO/EXPORTAÇÃO ---
 with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
-    # Download Template
+    # CORREÇÃO: Gerar CSV em vez de Excel para evitar erro de 'xlsxwriter'
     df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        df_template.to_excel(writer, index=False, sheet_name='Portfolio')
+    csv_template = df_template.to_csv(index=False).encode('utf-8')
     
     st.download_button(
-        label="Download Excel Template",
-        data=buffer.getvalue(),
-        file_name="portfolio_template.xlsx",
-        mime="application/vnd.ms-excel",
-        use_container_width=True
+        label="Download Template (CSV)",
+        data=csv_template,
+        file_name="portfolio_template.csv",
+        mime="text/csv",
+        use_container_width=True,
+        help="Use este arquivo CSV para preencher sua carteira e fazer o upload abaixo."
     )
     
     # Upload
-    uploaded_file = st.file_uploader("Upload Portfolio (xlsx/csv)", type=['xlsx', 'csv'])
+    uploaded_file = st.file_uploader("Upload Portfolio (CSV/XLSX)", type=['csv', 'xlsx'])
     if uploaded_file is not None:
         portfolio_dict, error_msg = load_portfolio_from_file(uploaded_file)
         if portfolio_dict:
             # Salva no Session State para sobrescrever os inputs manuais
             st.session_state['imported_portfolio'] = portfolio_dict
             st.session_state['tickers_text_key'] = ", ".join(portfolio_dict.keys())
-            st.success("Portfolio Loaded Successfully!")
+            st.success("Carteira carregada com sucesso!")
         else:
-            st.error(f"Error: {error_msg}")
+            st.error(f"Erro: {error_msg}")
 
 # Lógica para definir Tickers Padrão (Manual ou Importado)
 default_tickers_text = "VALE3.SA, PETR4.SA, BPAC11.SA"
