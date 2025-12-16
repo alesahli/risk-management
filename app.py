@@ -23,20 +23,14 @@ st.set_page_config(
 
 @st.cache_data
 def get_market_data(tickers, start_date, end_date):
-    """
-    Baixa dados do Yahoo Finance com tratamento robusto e ajuste de proventos.
-    """
     if not tickers: return pd.DataFrame()
     try:
         s_date = pd.to_datetime(start_date) - timedelta(days=20)
-        # auto_adjust=True garante retornos reais (dividendos/splits)
         df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=True, threads=False)
         
         if df.empty: return pd.DataFrame()
         
         data = pd.DataFrame()
-        
-        # Lógica de Extração da Coluna 'Close'
         if isinstance(df.columns, pd.MultiIndex):
             if 'Close' in df.columns: data = df['Close']
             elif 'Close' in df.columns.get_level_values(0): data = df.xs('Close', axis=1, level=0)
@@ -59,7 +53,6 @@ def get_market_data(tickers, start_date, end_date):
         return pd.DataFrame()
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
-    # Remove NaNs apenas para o cálculo
     returns = returns.dropna()
     if returns.empty: return {}
     
@@ -70,9 +63,19 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     if days > 10: ann_return = (1 + total_return)**(252 / days) - 1
     else: ann_return = total_return
     
+    # --- CÁLCULOS DE VOLATILIDADE ---
+    
+    # 1. Volatilidade Total
     ann_vol = returns.std() * np.sqrt(252)
+    
+    # 2. Volatilidade Downside (Semi-Desvio) - Risco Ruim
     neg_ret = returns[returns < 0]
-    semi_dev = neg_ret.std() * np.sqrt(252)
+    semi_dev = neg_ret.std() * np.sqrt(252) if len(neg_ret) > 1 else 0.0
+    
+    # 3. Volatilidade Upside (Desvio Positivo) - Risco Bom (Convexidade)
+    # NOVO CÁLCULO SOLICITADO
+    pos_ret = returns[returns > 0]
+    upside_dev = pos_ret.std() * np.sqrt(252) if len(pos_ret) > 1 else 0.0
     
     excess_ret = returns - rf_daily
     sharpe = (excess_ret.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else 0
@@ -94,7 +97,10 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
             
     return {
         "Retorno do Período": total_return, "Retorno Anualizado": ann_return,
-        "Volatilidade": ann_vol, "Semi-Desvio": semi_dev, "Beta": beta,
+        "Volatilidade": ann_vol, 
+        "Semi-Desvio": semi_dev,
+        "Upside-Desvio": upside_dev, # Nova Métrica retornada
+        "Beta": beta,
         "Sharpe": sharpe, "Sortino": sortino, "Max Drawdown": max_dd,
         "VaR 95%": var_95, "CVaR 95%": cvar_95
     }
@@ -210,8 +216,7 @@ def load_portfolio_from_file(uploaded_file):
     try:
         df = pd.DataFrame()
         if uploaded_file.name.endswith('.csv'):
-            try:
-                df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='utf-8-sig')
+            try: df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='utf-8-sig')
             except: pass
             if df.empty or df.shape[1] < 2:
                 uploaded_file.seek(0)
@@ -353,22 +358,17 @@ ret_sim = calculate_flexible_portfolio(assets_ret, weights_sim, cash_sim, rf_inp
 asset_stats = {}
 for t in valid_assets:
     m = calculate_metrics(assets_ret[t], rf_input, bench_ret)
-    
-    # --- CORREÇÃO DO KEYERROR AQUI ---
-    # Se m vier vazio (ativo sem dados suficientes), ignora este ativo nas estatísticas
-    if not m:
-        continue
-    # ---------------------------------
-        
+    if not m: continue
     up, down = calculate_capture_ratios(assets_ret[t], bench_ret)
     
-    # Uso de .get() para segurança extra
+    # Armazena todas as métricas necessárias para a tabela de volatilidade
     asset_stats[t] = {
         "Beta": m.get("Beta", 1.0), 
         "UpCapture": up, 
         "DownCapture": down, 
         "Vol": m.get("Volatilidade", 0.0), 
         "SemiDev": m.get("Semi-Desvio", 0.0), 
+        "UpsideDev": m.get("Upside-Desvio", 0.0), # Armazenando Upside
         "Ret": m.get("Retorno Anualizado", 0.0)
     }
 
@@ -492,12 +492,57 @@ with tab1:
     st.plotly_chart(fig1, use_container_width=True)
 
 with tab2:
+    # --- NOVO BLOCO: TABELA DE QUALIDADE DE VOLATILIDADE ---
+    st.markdown("##### Convexity Analysis")
+    st.caption("Identify assets where volatility is favorable (High Upside/Downside Ratio).")
+    
+    vol_data = []
+    for t, s in asset_stats.items():
+        vol = s['Vol']
+        down = s['SemiDev']
+        up = s['UpsideDev']
+        
+        ratio_tot_down = vol / down if down != 0 else 0
+        ratio_up_down = up / down if down != 0 else 0
+        
+        vol_data.append({
+            "Asset": t,
+            "Total Vol": vol,
+            "Downside Vol": down,
+            "Upside Vol": up,
+            "Total/Down Ratio": ratio_tot_down,
+            "Upside/Down Ratio": ratio_up_down
+        })
+    
+    if vol_data:
+        df_vol = pd.DataFrame(vol_data)
+        # Ordena pelo Ratio Upside/Downside (Maior = Mais Convexo)
+        df_vol = df_vol.sort_values("Upside/Down Ratio", ascending=False)
+        
+        # Estilização
+        st.dataframe(
+            df_vol.set_index("Asset").style
+            .format({
+                "Total Vol": "{:.2%}",
+                "Downside Vol": "{:.2%}",
+                "Upside Vol": "{:.2%}",
+                "Total/Down Ratio": "{:.2f}x",
+                "Upside/Down Ratio": "{:.2f}x"
+            })
+            .background_gradient(cmap="RdYlGn", subset=["Upside/Down Ratio"]),
+            use_container_width=True
+        )
+    
+    # Mantém o gráfico antigo logo abaixo
+    st.markdown("---")
+    st.markdown("##### Visual Analysis")
     q_data = [{"Label": t, "Vol": s["Vol"], "SemiDev": s["SemiDev"]} for t, s in asset_stats.items()]
     if q_data:
         df_q = pd.DataFrame(q_data)
         max_v = df_q["Vol"].max() * 1.1 if not df_q.empty else 1
         fig2 = px.scatter(df_q, x="Vol", y="SemiDev", text="Label", height=500)
         fig2.add_shape(type="line", x0=0, y0=0, x1=max_v, y1=max_v, line=dict(color="darkred", width=1, dash="dash"))
+        fig2.update_layout(xaxis_title="Total Volatility", yaxis_title="Downside Deviation (Bad Vol)")
         st.plotly_chart(fig2, use_container_width=True)
 
 with tab3:
