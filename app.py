@@ -22,52 +22,62 @@ st.set_page_config(
 
 @st.cache_data
 def get_market_data(tickers, start_date, end_date):
-    """Baixa dados do Yahoo Finance com tratamento de erros e formatos."""
+    """
+    Baixa dados do Yahoo Finance com tratamento de erros e formatos.
+    CORREÇÃO: Usa auto_adjust=True para garantir dados ajustados por proventos.
+    """
     if not tickers: return pd.DataFrame()
     try:
+        # Buffer de dias para garantir cálculo de retorno no dia inicial
         s_date = pd.to_datetime(start_date) - timedelta(days=10)
         
-        # CORREÇÃO: threads=False evita o travamento no Streamlit Cloud
-        df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=False, threads=False)
+        # CORREÇÃO: auto_adjust=True entrega o preço real de performance (com dividendos/splits)
+        # threads=False evita problemas de concorrência no Streamlit
+        df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=True, threads=False)
         
         if df.empty: return pd.DataFrame()
         
-        # Tratamento robusto para MultiIndex (nova versão yfinance) ou Index Simples
         data = pd.DataFrame()
         
-        # Verifica se é MultiIndex (vários ativos)
+        # Lógica robusta para extrair a coluna 'Close' (que já é ajustada devido ao auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex):
-            # Tenta extrair 'Adj Close' no nível 0 ou 1
-            if 'Adj Close' in df.columns.get_level_values(0):
-                data = df.xs('Adj Close', axis=1, level=0)
+            # Verifica se 'Close' está no nível superior (padrão atual do yfinance para multi-tickers)
+            if 'Close' in df.columns:
+                data = df['Close']
+            # Fallback para estruturas antigas ou invertidas
             elif 'Close' in df.columns.get_level_values(0):
                 data = df.xs('Close', axis=1, level=0)
-            # Tenta verificar se os níveis estão invertidos (Ticker no nível 0, Price Type no 1)
-            elif 'Adj Close' in df.columns.get_level_values(1):
-                data = df.xs('Adj Close', axis=1, level=1)
             elif 'Close' in df.columns.get_level_values(1):
                 data = df.xs('Close', axis=1, level=1)
             else:
-                # Fallback: tenta pegar a primeira coluna de cada par
+                # Se não achar 'Close', tenta pegar a primeira coluna de cada par (arriscado, mas fallback)
                 data = df.iloc[:, 0] 
         else:
             # Estrutura simples (um ativo ou colunas flat)
-            if 'Adj Close' in df.columns: data = df['Adj Close']
-            elif 'Close' in df.columns: data = df['Close']
-            else: data = df
+            if 'Close' in df.columns:
+                data = df[['Close']]
+            else:
+                data = df.iloc[:, [0]]
 
-        # Garante que seja DataFrame
+        # Garante que seja DataFrame e tenha o nome correto da coluna se for 1 ativo
         if isinstance(data, pd.Series):
             data = data.to_frame()
-            if len(tickers) == 1:
-                data.columns = tickers
+        
+        if len(tickers) == 1 and data.shape[1] == 1:
+            data.columns = tickers
         
         # Remove fuso horário para evitar erros de comparação
         data.index = data.index.tz_localize(None)
         
+        # Filtra pela data inicial solicitada (remove o buffer)
         data = data[data.index >= pd.to_datetime(start_date)]
-        return data.dropna()
+        
+        # Remove colunas que falharam completamente (all NaNs) e linhas vazias
+        data = data.dropna(axis=1, how='all').dropna()
+        
+        return data
     except Exception as e:
+        st.error(f"Erro ao baixar dados: {e}")
         return pd.DataFrame()
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
@@ -83,8 +93,10 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     semi_dev = neg_ret.std() * np.sqrt(252)
     
     excess_ret = returns - rf_daily
+    # Sharpe: Evita divisão por zero
     sharpe = (excess_ret.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else 0
-    sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252) if neg_ret.std() != 0 else 0
+    # Sortino: Evita divisão por zero
+    sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252) if (not neg_ret.empty and neg_ret.std() != 0) else 0
     
     cum = (1 + returns).cumprod()
     dd = (cum - cum.cummax()) / cum.cummax()
@@ -95,6 +107,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     
     beta = 0.0
     if benchmark_returns is not None:
+        # Alinha as séries por data
         aligned = pd.concat([returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
@@ -135,6 +148,7 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     fee_daily = (1 + fee_annual/100)**(1/252) - 1
     
     tickers = asset_returns.columns.tolist()
+    # Garante a ordem correta dos pesos baseada nas colunas do DataFrame
     initial_weights = np.array([weights_dict.get(t, 0) for t in tickers]) / 100.0
     w_cash_initial = cash_pct / 100.0
     
@@ -160,6 +174,7 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
             else:
                 rebal_dates = set(temp_resample)
         except:
+            # Fallback para pandas antigo
             if rebal_freq == 'Mensal': rebal_dates = set(asset_returns.resample('M').last().index)
             else: rebal_dates = set(asset_returns.resample('Q').last().index)
 
@@ -182,7 +197,7 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
         net_day_ret = day_ret - fee_daily
         portfolio_rets.append(net_day_ret)
         
-        # Atualização dos Pesos (Drift Natural)
+        # Atualização dos Pesos (Drift Natural devido à variação de preços)
         denominator = 1 + day_ret
         if denominator != 0:
             current_weights = current_weights * (1 + r_assets) / denominator
@@ -205,7 +220,7 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     
     num_assets = len(df_returns.columns)
     
-    # IMPROVEMENT: Smart Initial Guess based on Bounds
+    # Smart Initial Guess
     lower_bounds = np.array([b[0] for b in bounds])
     upper_bounds = np.array([b[1] for b in bounds])
     
@@ -228,6 +243,7 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
             net = gross - fee_daily
             neg = net[net < 0]
             current_semi = neg.std() * np.sqrt(252)
+            # Restrição: SemiDev Calculado <= Target
             return (target_semidev_val/100.0) - current_semi
         constraints.append({'type': 'ineq', 'fun': semidev_constraint})
 
@@ -236,19 +252,20 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
         gross_ret = df_returns.dot(w)
         net_ret = gross_ret - fee_daily
         
-        # Penalidade para soma fugir de 1
+        # Penalidade suave se a soma fugir muito de 1 (auxiliar ao SLSQP)
         if abs(np.sum(w) - 1.0) > 0.001: return 1e5
         
         if target_metric == "Max Sortino":
             neg_ret = net_ret[net_ret < 0]
-            semi_dev = neg_ret.std() * np.sqrt(252)
-            if semi_dev == 0: return 1e5
+            if neg_ret.empty or neg_ret.std() == 0: return 1e5
+            
             excess_ret = net_ret - rf_daily
             sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252)
-            return -sortino
+            return -sortino # Minimizar o negativo = Maximizar o positivo
             
         elif target_metric == "Min Downside Volatility":
             neg_ret = net_ret[net_ret < 0]
+            if neg_ret.empty: return 0
             semi_dev = neg_ret.std() * np.sqrt(252)
             return semi_dev
         
@@ -257,7 +274,6 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
             ann_ret = (1 + total_ret)**(252 / len(net_ret)) - 1
             return -ann_ret
             
-    # IMPROVEMENT: Increased maxiter
     result = minimize(
         objective, 
         initial_guess, 
@@ -265,7 +281,7 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
         bounds=bounds, 
         constraints=constraints, 
         tol=1e-6,
-        options={'maxiter': 1000} # Increased from default 100
+        options={'maxiter': 1000}
     )
     return result
 
@@ -348,16 +364,24 @@ if tickers_input:
 all_tickers = list(set(tickers_input + [bench_ticker]))
 
 with st.spinner("Fetching market data..."):
+    # Chama a função corrigida
     df_prices = get_market_data(all_tickers, start_date, end_date)
 
 if df_prices.empty: st.error("No data found. Check tickers or internet connection."); st.stop()
+
+# Calcula retornos diários
 df_ret = df_prices.ffill().pct_change().dropna()
 
+# Separa Benchmark e Ativos
 if bench_ticker in df_ret.columns: bench_ret = df_ret[bench_ticker]
 else: bench_ret = pd.Series(0, index=df_ret.index)
 
 valid_assets = [t for t in tickers_input if t in df_ret.columns]
 assets_ret = df_ret[valid_assets]
+
+if not valid_assets:
+    st.error("Nenhum dos ativos inseridos foi encontrado no Yahoo Finance.")
+    st.stop()
 
 # --- CÁLCULO DAS CARTEIRAS ---
 ret_orig = calculate_flexible_portfolio(assets_ret, weights_orig, cash_orig, rf_input, mgmt_fee, rebal_freq="Diário")
@@ -404,7 +428,7 @@ with col_delta:
     st.metric("Portfolio Beta", f"{m_sim['Beta']:.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
     if mgmt_fee > 0: st.caption(f"*Includes annual management fee of {mgmt_fee}%")
 
-# --- BLOCO B: STRESS TEST (COM BETA PROXY) ---
+# --- BLOCO B: STRESS TEST (COM DADOS CORRIGIDOS) ---
 with st.expander("Stress Test Scenarios (Historical)", expanded=False):
     scenario = st.radio("Select Scenario:", ["COVID-19 Crash (2020)", "Hawkish Cycle (2021-2022)"], horizontal=True)
     
@@ -416,21 +440,21 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
         s_start, s_end = "2021-06-01", "2022-07-25"
         period_start, period_end = "2021-06-08", "2022-07-18"
 
-    # 1. Baixar Benchmark separadamente com CORREÇÃO DE THREADS
+    # 1. Baixar Benchmark separadamente com CORREÇÃO DE THREADS e AUTO_ADJUST
     try:
-        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
+        # auto_adjust=True garante que estamos vendo o retorno real
+        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
+        
         if not df_bench_stress.empty:
-            # Tratamento simplificado para benchmark
+            # Seleção robusta da coluna 'Close'
             if isinstance(df_bench_stress.columns, pd.MultiIndex):
-                if 'Adj Close' in df_bench_stress.columns.get_level_values(0):
-                    df_bench_stress = df_bench_stress['Adj Close']
-                elif 'Close' in df_bench_stress.columns.get_level_values(0):
-                    df_bench_stress = df_bench_stress['Close']
-                else:
-                    df_bench_stress = df_bench_stress.iloc[:, 0]
+                if 'Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Close']
+                elif 'Close' in df_bench_stress.columns.get_level_values(0): df_bench_stress = df_bench_stress.xs('Close', axis=1, level=0)
+                else: df_bench_stress = df_bench_stress.iloc[:, 0]
+            elif 'Close' in df_bench_stress.columns:
+                 df_bench_stress = df_bench_stress['Close']
             else:
-                if 'Adj Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Adj Close']
-                elif 'Close' in df_bench_stress.columns: df_bench_stress = df_bench_stress['Close']
+                 df_bench_stress = df_bench_stress.iloc[:, 0]
             
             # Garante Série
             if isinstance(df_bench_stress, pd.DataFrame):
@@ -440,24 +464,27 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
     except:
         df_bench_stress = pd.Series()
 
-    # 2. Baixar Ativos com CORREÇÃO DE THREADS
+    # 2. Baixar Ativos com CORREÇÃO DE THREADS e AUTO_ADJUST
     df_assets_stress = pd.DataFrame()
     if tickers_input:
         try:
-            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
+            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
             if not raw_assets.empty:
-                # Tratamento simplificado para ativos
+                # Seleção robusta da coluna 'Close'
                 if isinstance(raw_assets.columns, pd.MultiIndex):
-                    if 'Adj Close' in raw_assets.columns.get_level_values(0):
-                         df_assets_stress = raw_assets.xs('Adj Close', axis=1, level=0)
+                    if 'Close' in raw_assets.columns:
+                        df_assets_stress = raw_assets['Close']
                     elif 'Close' in raw_assets.columns.get_level_values(0):
                          df_assets_stress = raw_assets.xs('Close', axis=1, level=0)
+                    elif 'Close' in raw_assets.columns.get_level_values(1):
+                         df_assets_stress = raw_assets.xs('Close', axis=1, level=1)
                     else:
                          df_assets_stress = raw_assets.iloc[:, 0]
+                elif 'Close' in raw_assets.columns:
+                    df_assets_stress = raw_assets[['Close']]
+                    if len(tickers_input) == 1: df_assets_stress.columns = tickers_input
                 else:
-                    if 'Adj Close' in raw_assets.columns: df_assets_stress = raw_assets['Adj Close']
-                    elif 'Close' in raw_assets.columns: df_assets_stress = raw_assets['Close']
-                    else: df_assets_stress = raw_assets
+                    df_assets_stress = raw_assets
                 
                 if isinstance(df_assets_stress, pd.Series):
                     df_assets_stress = df_assets_stress.to_frame(name=tickers_input[0])
