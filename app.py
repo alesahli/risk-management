@@ -63,17 +63,13 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     if days > 10: ann_return = (1 + total_return)**(252 / days) - 1
     else: ann_return = total_return
     
-    # --- CÁLCULOS DE VOLATILIDADE ---
-    
-    # 1. Volatilidade Total
+    # Volatilidade
     ann_vol = returns.std() * np.sqrt(252)
     
-    # 2. Volatilidade Downside (Semi-Desvio) - Risco Ruim
+    # Downside & Upside
     neg_ret = returns[returns < 0]
     semi_dev = neg_ret.std() * np.sqrt(252) if len(neg_ret) > 1 else 0.0
     
-    # 3. Volatilidade Upside (Desvio Positivo) - Risco Bom (Convexidade)
-    # NOVO CÁLCULO SOLICITADO
     pos_ret = returns[returns > 0]
     upside_dev = pos_ret.std() * np.sqrt(252) if len(pos_ret) > 1 else 0.0
     
@@ -99,7 +95,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
         "Retorno do Período": total_return, "Retorno Anualizado": ann_return,
         "Volatilidade": ann_vol, 
         "Semi-Desvio": semi_dev,
-        "Upside-Desvio": upside_dev, # Nova Métrica retornada
+        "Upside-Desvio": upside_dev,
         "Beta": beta,
         "Sharpe": sharpe, "Sortino": sortino, "Max Drawdown": max_dd,
         "VaR 95%": var_95, "CVaR 95%": cvar_95
@@ -211,7 +207,7 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options={'maxiter': 1000})
     return result
 
-# --- FUNÇÃO DE IMPORTAÇÃO BLINDADA ---
+# --- FUNÇÃO DE IMPORTAÇÃO ---
 def load_portfolio_from_file(uploaded_file):
     try:
         df = pd.DataFrame()
@@ -360,15 +356,13 @@ for t in valid_assets:
     m = calculate_metrics(assets_ret[t], rf_input, bench_ret)
     if not m: continue
     up, down = calculate_capture_ratios(assets_ret[t], bench_ret)
-    
-    # Armazena todas as métricas necessárias para a tabela de volatilidade
     asset_stats[t] = {
         "Beta": m.get("Beta", 1.0), 
         "UpCapture": up, 
         "DownCapture": down, 
         "Vol": m.get("Volatilidade", 0.0), 
         "SemiDev": m.get("Semi-Desvio", 0.0), 
-        "UpsideDev": m.get("Upside-Desvio", 0.0), # Armazenando Upside
+        "UpsideDev": m.get("Upside-Desvio", 0.0), 
         "Ret": m.get("Retorno Anualizado", 0.0)
     }
 
@@ -397,7 +391,15 @@ with col_kpi:
     for c in df_comp.columns[1:]:
         df_comp[c] = df_comp[c].apply(lambda x: f"{x:.2%}" if abs(x)<5 and x!=0 else f"{x:.2f}")
     
-    st.dataframe(df_comp.set_index("Metric").style.applymap(lambda x: "background-color: #f0f2f6; font-weight: bold", subset=(["Retorno do Período"], slice(None))), use_container_width=True)
+    # Função simples de estilização manual para evitar matplotlib
+    def highlight_kpi(val):
+        return "background-color: #f0f2f6; font-weight: bold"
+    
+    st.dataframe(
+        df_comp.set_index("Metric").style.applymap(highlight_kpi, subset=(["Retorno do Período"], slice(None))), 
+        use_container_width=True
+    )
+    
     if rebal_freq_sim != "Diário": st.info(f"ℹ️ Drift active: '{rebal_freq_sim}' vs 'Fixed Weights'. Set Frequency to 'Diário' to match Solver/Fixed targets.")
 
 with col_delta:
@@ -492,7 +494,6 @@ with tab1:
     st.plotly_chart(fig1, use_container_width=True)
 
 with tab2:
-    # --- NOVO BLOCO: TABELA DE QUALIDADE DE VOLATILIDADE ---
     st.markdown("##### Convexity Analysis")
     st.caption("Identify assets where volatility is favorable (High Upside/Downside Ratio).")
     
@@ -516,10 +517,17 @@ with tab2:
     
     if vol_data:
         df_vol = pd.DataFrame(vol_data)
-        # Ordena pelo Ratio Upside/Downside (Maior = Mais Convexo)
         df_vol = df_vol.sort_values("Upside/Down Ratio", ascending=False)
         
-        # Estilização
+        # --- FUNÇÃO MANUAL DE CORES PARA EVITAR MATPLOTLIB ---
+        def color_ratio(val):
+            if val > 1.1:
+                return 'background-color: #d8f5d8; color: black' # Verde claro
+            elif val < 0.9:
+                return 'background-color: #f5d8d8; color: black' # Vermelho claro
+            else:
+                return ''
+        
         st.dataframe(
             df_vol.set_index("Asset").style
             .format({
@@ -529,11 +537,10 @@ with tab2:
                 "Total/Down Ratio": "{:.2f}x",
                 "Upside/Down Ratio": "{:.2f}x"
             })
-            .background_gradient(cmap="RdYlGn", subset=["Upside/Down Ratio"]),
+            .applymap(color_ratio, subset=["Upside/Down Ratio"]),
             use_container_width=True
         )
     
-    # Mantém o gráfico antigo logo abaixo
     st.markdown("---")
     st.markdown("##### Visual Analysis")
     q_data = [{"Label": t, "Vol": s["Vol"], "SemiDev": s["SemiDev"]} for t, s in asset_stats.items()]
