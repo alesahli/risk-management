@@ -59,6 +59,7 @@ def get_market_data(tickers, start_date, end_date):
         return pd.DataFrame()
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
+    # Remove NaNs apenas para o cálculo
     returns = returns.dropna()
     if returns.empty: return {}
     
@@ -208,95 +209,55 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
 def load_portfolio_from_file(uploaded_file):
     try:
         df = pd.DataFrame()
-        
-        # Se for CSV
         if uploaded_file.name.endswith('.csv'):
-            # TENTATIVA 1: Ponto e vírgula + utf-8-sig (Exatamente como o Template é gerado)
             try:
                 df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='utf-8-sig')
-            except:
-                pass
-            
-            # TENTATIVA 2: Se leu tudo em 1 coluna ou falhou, tenta vírgula (formato US)
+            except: pass
             if df.empty or df.shape[1] < 2:
                 uploaded_file.seek(0)
-                try:
-                    df = pd.read_csv(uploaded_file, sep=',', decimal='.')
-                except:
-                    pass
-            
-            # TENTATIVA 3: Encoding Latin-1 (Excel antigo BR)
+                try: df = pd.read_csv(uploaded_file, sep=',', decimal='.')
+                except: pass
             if df.empty or df.shape[1] < 2:
                 uploaded_file.seek(0)
-                try:
-                    df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='latin1')
-                except:
-                    pass
-                    
-        # Se for Excel
+                try: df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='latin1')
+                except: pass
         else:
-            try:
-                df = pd.read_excel(uploaded_file)
-            except ImportError:
-                return None, "Servidor sem suporte a .xlsx. Por favor use o Template CSV."
+            try: df = pd.read_excel(uploaded_file)
+            except ImportError: return None, "Servidor sem suporte a .xlsx. Por favor use o Template CSV."
         
-        if df.empty:
-            return None, "Não foi possível ler o arquivo. Verifique se é um CSV válido."
+        if df.empty: return None, "Não foi possível ler o arquivo. Verifique se é um CSV válido."
 
-        # Normaliza nomes das colunas (remove espaços e põe minusculo)
         df.columns = [str(c).lower().strip() for c in df.columns]
-        
-        # Procura colunas flexivelmente
         col_ticker = next((c for c in df.columns if c in ['ativo', 'ticker', 'asset', 'symbol', 'código']), None)
         col_weight = next((c for c in df.columns if c in ['peso', 'weight', 'alocacao', '%', 'valor']), None)
         
-        if not col_ticker or not col_weight:
-            # Debug: Mostra o que leu se der erro
-            return None, f"Colunas 'Ativo' e 'Peso' não encontradas. Colunas lidas: {list(df.columns)}"
+        if not col_ticker or not col_weight: return None, f"Colunas 'Ativo' e 'Peso' não encontradas."
         
         portfolio = {}
         for _, row in df.iterrows():
             t = str(row[col_ticker]).strip().upper()
-            val_raw = str(row[col_weight]).replace(',', '.') # Garante ponto decimal
-            try:
-                w = float(val_raw)
-            except:
-                w = 0.0
+            val_raw = str(row[col_weight]).replace(',', '.')
+            try: w = float(val_raw)
+            except: w = 0.0
+            if w > 0: portfolio[t] = w
             
-            if w > 0: 
-                portfolio[t] = w
-            
-        # Ajuste percentual
         total_w = sum(portfolio.values())
         if total_w <= 1.05 and total_w > 0:
              for k in portfolio: portfolio[k] = portfolio[k] * 100.0
 
         return portfolio, None
-    except Exception as e:
-        return None, str(e)
+    except Exception as e: return None, str(e)
 
 # ==============================================================================
 # 3. BARRA LATERAL (INPUTS)
 # ==============================================================================
 st.sidebar.header("Portfolio Configuration")
 
-# --- BLOCO DE IMPORTAÇÃO/EXPORTAÇÃO ---
 with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
-    # TEMPLATE CSV (Excel BR Friendly)
     df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
-    # utf-8-sig para abrir corretamente no Excel sem perder acentos (se houver)
     csv_template = df_template.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
+    st.download_button(label="Download Template (CSV)", data=csv_template, file_name="portfolio_template.csv", mime="text/csv", use_container_width=True)
     
-    st.download_button(
-        label="Download Template (CSV)",
-        data=csv_template,
-        file_name="portfolio_template.csv",
-        mime="text/csv",
-        use_container_width=True,
-        help="Use este modelo. Preencha e salve."
-    )
-    
-    # Upload
     uploaded_file = st.file_uploader("Upload Portfolio (CSV/XLSX)", type=['csv', 'xlsx'])
     if uploaded_file is not None:
         portfolio_dict, error_msg = load_portfolio_from_file(uploaded_file)
@@ -307,15 +268,12 @@ with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
         else:
             st.error(f"Erro: {error_msg}")
 
-# Lógica para definir Tickers Padrão
 default_tickers_text = "VALE3.SA, PETR4.SA, BPAC11.SA"
-if 'tickers_text_key' in st.session_state:
-    default_tickers_text = st.session_state['tickers_text_key']
+if 'tickers_text_key' in st.session_state: default_tickers_text = st.session_state['tickers_text_key']
 
 tickers_text = st.sidebar.text_area("Asset Tickers:", value=default_tickers_text, height=100)
 tickers_input = [t.strip().upper() for t in tickers_text.split(',') if t.strip()]
 
-# Seleção de Datas
 periodo_option = st.sidebar.radio("Time Horizon:", ["1 Ano", "2 Anos", "Desde 2020", "Personalizado"], horizontal=True)
 end_date = datetime.today()
 if periodo_option == "1 Ano": start_date = end_date - timedelta(days=365)
@@ -339,43 +297,30 @@ rebal_freq_sim = st.sidebar.selectbox("Frequency:", ["Sem Rebalanceamento", "Men
 st.sidebar.markdown("---")
 st.sidebar.subheader("Allocation")
 weights_orig, weights_sim = {}, {}
-
-# Verifica se existe portfolio importado para usar os pesos
 imported_data = st.session_state.get('imported_portfolio', {})
 
 if tickers_input:
     total_orig, total_sim = 0, 0
     def_val_calc = 100.0 / len(tickers_input) if len(tickers_input) > 0 else 0
-    
-    # Cabeçalho da tabela de pesos
     c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
-    c1.markdown("**Ticker**")
-    c2.markdown("**Curr %**")
-    c3.markdown("**Sim %**")
+    c1.markdown("**Ticker**"); c2.markdown("**Curr %**"); c3.markdown("**Sim %**")
 
     for t in tickers_input:
         c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
         c1.text(t)
-        
-        # Prioridade: 1. Importado, 2. Divisão igualitária
-        if imported_data:
-            val_default = imported_data.get(t, 0.0)
-        else:
-            val_default = def_val_calc
+        if imported_data: val_default = imported_data.get(t, 0.0)
+        else: val_default = def_val_calc
         
         w_o = c2.number_input(f"o_{t}", 0.0, 100.0, float(val_default), step=5.0, label_visibility="collapsed")
-        
         key_sim = f"sim_{t}"
         if key_sim not in st.session_state: st.session_state[key_sim] = float(val_default)
         w_s = c3.number_input(f"s_{t}", 0.0, 100.0, key=key_sim, step=5.0, label_visibility="collapsed")
-        
         weights_orig[t] = w_o; weights_sim[t] = w_s 
         total_orig += w_o; total_sim += w_s
     
     cash_orig = 100 - total_orig; cash_sim = 100 - total_sim
     st.sidebar.info(f"Cash Position: Current {cash_orig:.0f}% | Simulated {cash_sim:.0f}%")
     
-    # Export Button (Current Allocation) - Com formato Brasileiro
     if total_orig > 0:
         df_export = pd.DataFrame(list(weights_orig.items()), columns=["Ativo", "Peso"])
         csv_exp = df_export.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
@@ -408,10 +353,23 @@ ret_sim = calculate_flexible_portfolio(assets_ret, weights_sim, cash_sim, rf_inp
 asset_stats = {}
 for t in valid_assets:
     m = calculate_metrics(assets_ret[t], rf_input, bench_ret)
+    
+    # --- CORREÇÃO DO KEYERROR AQUI ---
+    # Se m vier vazio (ativo sem dados suficientes), ignora este ativo nas estatísticas
+    if not m:
+        continue
+    # ---------------------------------
+        
     up, down = calculate_capture_ratios(assets_ret[t], bench_ret)
+    
+    # Uso de .get() para segurança extra
     asset_stats[t] = {
-        "Beta": m.get("Beta", 1.0), "UpCapture": up, "DownCapture": down, 
-        "Vol": m["Volatilidade"], "SemiDev": m["Semi-Desvio"], "Ret": m["Retorno Anualizado"]
+        "Beta": m.get("Beta", 1.0), 
+        "UpCapture": up, 
+        "DownCapture": down, 
+        "Vol": m.get("Volatilidade", 0.0), 
+        "SemiDev": m.get("Semi-Desvio", 0.0), 
+        "Ret": m.get("Retorno Anualizado", 0.0)
     }
 
 # ==============================================================================
@@ -432,8 +390,8 @@ with col_kpi:
     
     df_comp = pd.DataFrame({
         "Metric": keys_present, 
-        "Current (Fixed W)": [m_orig[k] for k in keys_present], 
-        f"Simulated ({rebal_freq_sim})": [m_sim[k] for k in keys_present], 
+        "Current (Fixed W)": [m_orig.get(k, 0) for k in keys_present], 
+        f"Simulated ({rebal_freq_sim})": [m_sim.get(k, 0) for k in keys_present], 
         "Benchmark": [m_bench.get(k, 0) for k in keys_present]
     })
     for c in df_comp.columns[1:]:
@@ -444,11 +402,11 @@ with col_kpi:
 
 with col_delta:
     st.markdown("##### Performance Delta")
-    d_ret = m_sim["Retorno do Período"] - m_orig["Retorno do Período"]
-    d_beta = m_sim["Beta"] - m_orig["Beta"]
-    st.metric("Total Period Return", f"{m_sim['Retorno do Período']:.2%}", delta=f"{d_ret:.2%}")
-    st.metric("Annualized Return", f"{m_sim['Retorno Anualizado']:.2%}")
-    st.metric("Portfolio Beta", f"{m_sim['Beta']:.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
+    d_ret = m_sim.get("Retorno do Período", 0) - m_orig.get("Retorno do Período", 0)
+    d_beta = m_sim.get("Beta", 0) - m_orig.get("Beta", 0)
+    st.metric("Total Period Return", f"{m_sim.get('Retorno do Período', 0):.2%}", delta=f"{d_ret:.2%}")
+    st.metric("Annualized Return", f"{m_sim.get('Retorno Anualizado', 0):.2%}")
+    st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0):.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
 # --- BLOCO B: STRESS TEST ---
 with st.expander("Stress Test Scenarios (Historical)", expanded=False):
@@ -525,9 +483,9 @@ with tab1:
     x_key = "Vol" if risk_mode == "Total Volatility" else "SemiDev"
     scatter_data = []
     for t, s in asset_stats.items(): scatter_data.append({"Label": t, "X": s[x_key], "Y": s["Ret"], "Type": "Asset", "Size": 8})
-    scatter_data.append({"Label": "CURRENT", "X": m_orig["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_orig["Retorno Anualizado"], "Type": "Current Portfolio", "Size": 20})
-    scatter_data.append({"Label": "SIMULATED", "X": m_sim["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_sim["Retorno Anualizado"], "Type": "Simulated Portfolio", "Size": 20})
-    scatter_data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade" if x_key=="Vol" else "Semi-Desvio",0), "Y": m_bench.get("Retorno Anualizado",0), "Type": "Benchmark", "Size": 12})
+    scatter_data.append({"Label": "CURRENT", "X": m_orig.get("Volatilidade" if x_key=="Vol" else "Semi-Desvio", 0), "Y": m_orig.get("Retorno Anualizado", 0), "Type": "Current Portfolio", "Size": 20})
+    scatter_data.append({"Label": "SIMULATED", "X": m_sim.get("Volatilidade" if x_key=="Vol" else "Semi-Desvio", 0), "Y": m_sim.get("Retorno Anualizado", 0), "Type": "Simulated Portfolio", "Size": 20})
+    scatter_data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade" if x_key=="Vol" else "Semi-Desvio", 0), "Y": m_bench.get("Retorno Anualizado", 0), "Type": "Benchmark", "Size": 12})
     fig1 = px.scatter(pd.DataFrame(scatter_data), x="X", y="Y", color="Type", size="Size", text="Label", 
                       color_discrete_map={"Asset": "#636EFA", "Current Portfolio": "#00CC96", "Simulated Portfolio": "#FFD700", "Benchmark": "#7F7F7F"})
     fig1.update_layout(xaxis_title=risk_mode, yaxis_title="Annualized Return"); fig1.update_traces(textposition='top center')
