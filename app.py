@@ -207,14 +207,25 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
 # --- FUNÇÃO DE IMPORTAÇÃO BLINDADA ---
 def load_portfolio_from_file(uploaded_file):
     try:
+        # Tenta ler CSV
         if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
+            try:
+                # Tenta primeiro com separador automático (python engine)
+                df = pd.read_csv(uploaded_file, sep=None, engine='python', decimal=',')
+                # Se após ler só tiver 1 coluna, provavelmente o separador estava errado (Excel BR salva com ;)
+                if df.shape[1] < 2:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, sep=';', decimal=',')
+            except:
+                # Fallback direto para ponto e vírgula
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, sep=';', decimal=',')
         else:
-            # Tenta ler Excel. Se falhar por falta de bibliotecas, avisa o usuário.
+            # Tenta ler Excel (XLSX)
             try:
                 df = pd.read_excel(uploaded_file)
             except ImportError:
-                return None, "O servidor não possui bibliotecas para ler Excel (.xlsx). Por favor, converta seu arquivo para CSV e tente novamente."
+                return None, "O servidor não possui bibliotecas para ler Excel (.xlsx). Por favor, use o Template CSV fornecido."
         
         # Normaliza colunas
         df.columns = [str(c).lower().strip() for c in df.columns]
@@ -229,10 +240,16 @@ def load_portfolio_from_file(uploaded_file):
         portfolio = {}
         for _, row in df.iterrows():
             t = str(row[col_ticker]).strip().upper()
-            w = float(row[col_weight])
-            portfolio[t] = w
+            val = str(row[col_weight]).replace(',', '.') # Garante ponto decimal
+            try:
+                w = float(val)
+            except:
+                w = 0.0
             
-        # Ajuste percentual simples na importação
+            if w > 0: # Ignora ativos zerados
+                portfolio[t] = w
+            
+        # Ajuste percentual simples na importação (se user colocou 0.1, vira 10)
         total_w = sum(portfolio.values())
         if total_w <= 1.05 and total_w > 0:
              for k in portfolio: portfolio[k] = portfolio[k] * 100.0
@@ -248,17 +265,18 @@ st.sidebar.header("Portfolio Configuration")
 
 # --- BLOCO DE IMPORTAÇÃO/EXPORTAÇÃO ---
 with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
-    # CORREÇÃO: Gerar CSV em vez de Excel para evitar erro de 'xlsxwriter'
+    # CRIAÇÃO DO TEMPLATE (CORRIGIDO: Sep=';' e Decimal=',')
     df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
-    csv_template = df_template.to_csv(index=False).encode('utf-8')
+    # utf-8-sig adiciona o BOM, ajudando o Excel a reconhecer a codificação correta
+    csv_template = df_template.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
     
     st.download_button(
-        label="Download Template (CSV)",
+        label="Download Template (CSV - Excel Friendly)",
         data=csv_template,
         file_name="portfolio_template.csv",
         mime="text/csv",
         use_container_width=True,
-        help="Use este arquivo CSV para preencher sua carteira e fazer o upload abaixo."
+        help="Arquivo CSV formatado para Excel (separador ponto-e-vírgula)."
     )
     
     # Upload
@@ -266,14 +284,13 @@ with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
     if uploaded_file is not None:
         portfolio_dict, error_msg = load_portfolio_from_file(uploaded_file)
         if portfolio_dict:
-            # Salva no Session State para sobrescrever os inputs manuais
             st.session_state['imported_portfolio'] = portfolio_dict
             st.session_state['tickers_text_key'] = ", ".join(portfolio_dict.keys())
-            st.success("Carteira carregada com sucesso!")
+            st.success("Carteira carregada! (Veja abaixo)")
         else:
             st.error(f"Erro: {error_msg}")
 
-# Lógica para definir Tickers Padrão (Manual ou Importado)
+# Lógica para definir Tickers Padrão
 default_tickers_text = "VALE3.SA, PETR4.SA, BPAC11.SA"
 if 'tickers_text_key' in st.session_state:
     default_tickers_text = st.session_state['tickers_text_key']
@@ -311,7 +328,8 @@ imported_data = st.session_state.get('imported_portfolio', {})
 
 if tickers_input:
     total_orig, total_sim = 0, 0
-    def_val_calc = float(int(100/len(tickers_input)))
+    # Calcula divisão igualitária caso não tenha dados importados
+    def_val_calc = 100.0 / len(tickers_input) if len(tickers_input) > 0 else 0
     
     # Cabeçalho da tabela de pesos
     c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
@@ -323,13 +341,18 @@ if tickers_input:
         c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
         c1.text(t)
         
-        # Define valor padrão: Se estiver no importado usa ele, senão usa divisão igualitária
-        val_default = imported_data.get(t, def_val_calc)
+        # Lógica de prioridade: 
+        # 1. Se o ativo está na lista importada, usa o peso importado.
+        # 2. Se não está na importada, usa 0 (se houve importação) ou divisão igualitária (se não houve).
+        if imported_data:
+            val_default = imported_data.get(t, 0.0)
+        else:
+            val_default = def_val_calc
         
-        w_o = c2.number_input(f"o_{t}", 0.0, 100.0, val_default, step=5.0, label_visibility="collapsed")
+        w_o = c2.number_input(f"o_{t}", 0.0, 100.0, float(val_default), step=5.0, label_visibility="collapsed")
         
         key_sim = f"sim_{t}"
-        if key_sim not in st.session_state: st.session_state[key_sim] = val_default
+        if key_sim not in st.session_state: st.session_state[key_sim] = float(val_default)
         w_s = c3.number_input(f"s_{t}", 0.0, 100.0, key=key_sim, step=5.0, label_visibility="collapsed")
         
         weights_orig[t] = w_o; weights_sim[t] = w_s 
@@ -338,10 +361,10 @@ if tickers_input:
     cash_orig = 100 - total_orig; cash_sim = 100 - total_sim
     st.sidebar.info(f"Cash Position: Current {cash_orig:.0f}% | Simulated {cash_sim:.0f}%")
     
-    # Export Button (Current Allocation)
+    # Export Button (Current Allocation) - Com formato Brasileiro
     if total_orig > 0:
         df_export = pd.DataFrame(list(weights_orig.items()), columns=["Ativo", "Peso"])
-        csv_exp = df_export.to_csv(index=False).encode('utf-8')
+        csv_exp = df_export.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
         st.sidebar.download_button("Export Current Portfolio (CSV)", data=csv_exp, file_name="my_portfolio.csv", mime="text/csv")
 
 # ==============================================================================
