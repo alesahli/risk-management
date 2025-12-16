@@ -27,53 +27,42 @@ def get_market_data(tickers, start_date, end_date):
     """
     if not tickers: return pd.DataFrame()
     try:
-        # Buffer de dias para garantir que o cálculo de retorno comece exatamente na data pedida
+        # Buffer de dias para cálculo de retorno
         s_date = pd.to_datetime(start_date) - timedelta(days=20)
         
-        # CORREÇÃO CRÍTICA 1: auto_adjust=True
-        # Garante que o preço já venha descontado de dividendos e splits.
-        # threads=False previne erros no Streamlit Cloud.
+        # auto_adjust=True para retornos reais (dividendos/splits)
         df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=True, threads=False)
         
         if df.empty: return pd.DataFrame()
         
         data = pd.DataFrame()
         
-        # --- Lógica de Extração da Coluna 'Close' ---
-        # O yfinance muda o formato dependendo da versão e qtd de ativos. Isso padroniza:
+        # Lógica de Extração da Coluna 'Close'
         if isinstance(df.columns, pd.MultiIndex):
-            # Prioridade: Coluna 'Close' no nível superior (formato novo yfinance)
             if 'Close' in df.columns:
                 data = df['Close']
-            # Formatos antigos/alternativos
             elif 'Close' in df.columns.get_level_values(0):
                 data = df.xs('Close', axis=1, level=0)
             elif 'Close' in df.columns.get_level_values(1):
                 data = df.xs('Close', axis=1, level=1)
             else:
-                # Fallback extremo: pega a primeira coluna de cada ativo
                 data = df.iloc[:, 0] 
         else:
-            # Apenas 1 ativo ou estrutura flat
             if 'Close' in df.columns:
                 data = df[['Close']]
             else:
                 data = df.iloc[:, [0]]
 
-        # Garante DataFrame e nomes de colunas corretos
         if isinstance(data, pd.Series):
             data = data.to_frame()
         
         if len(tickers) == 1 and data.shape[1] == 1:
             data.columns = tickers
         
-        # Limpeza de Fuso Horário e Filtro de Data
         data.index = data.index.tz_localize(None)
-        
-        # Filtra para iniciar exatamente na data pedida pelo usuário
         data = data[data.index >= pd.to_datetime(start_date)]
         
-        # Remove colunas inteiramente vazias, mas NÃO remove linhas ainda (para não perder dados desalinhados)
+        # Remove colunas vazias, mas mantém linhas para alinhamento temporal
         data = data.dropna(axis=1, how='all')
         
         return data
@@ -84,9 +73,8 @@ def get_market_data(tickers, start_date, end_date):
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     """
     Calcula métricas de risco e retorno.
-    CORREÇÃO 2: Distingue 'Retorno Total' (o que aconteceu) de 'Retorno Anual' (projeção).
     """
-    # Remove NaNs apenas para o ativo específico sendo calculado neste momento
+    # Remove NaNs apenas para o cálculo estatístico final
     returns = returns.dropna()
     
     if returns.empty: return {}
@@ -94,16 +82,14 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     rf_daily = (1 + rf_annual/100)**(1/252) - 1
     days = len(returns)
     
-    # --- CÁLCULOS DE RETORNO ---
-    # 1. Retorno Total do Período (Acumulado): É o valor exato que variou entre data X e Y.
+    # Retorno Total (Acumulado Real)
     total_return = (1 + returns).prod() - 1
     
-    # 2. Retorno Anualizado (CAGR): É a projeção desse ritmo para 1 ano (252 dias úteis).
-    # Se o período for curto (ex: 1 mês), isso vai inflar o número (ex: 3% vira 40% a.a.).
+    # Retorno Anualizado (CAGR)
     if days > 10:
         ann_return = (1 + total_return)**(252 / days) - 1
     else:
-        ann_return = total_return # Para períodos muito curtos, mantém o total para não distorcer
+        ann_return = total_return
     
     ann_vol = returns.std() * np.sqrt(252)
     
@@ -123,7 +109,6 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     
     beta = 0.0
     if benchmark_returns is not None:
-        # Alinha as séries apenas onde ambas existem
         aligned = pd.concat([returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
@@ -131,8 +116,8 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
             beta = cov / var_bench if var_bench != 0 else 0
             
     return {
-        "Retorno do Período": total_return, # O valor real acumulado (ex: 11%)
-        "Retorno Anualizado": ann_return,   # O valor projetado anual (ex: 40%)
+        "Retorno do Período": total_return,
+        "Retorno Anualizado": ann_return,
         "Volatilidade": ann_vol,
         "Semi-Desvio": semi_dev,
         "Beta": beta,
@@ -158,7 +143,10 @@ def calculate_capture_ratios(asset_ret, bench_ret):
     return up_cap * 100.0, down_cap * 100.0
 
 def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annual, fee_annual, rebal_freq):
-    """Calcula a carteira dia a dia, tratando dados faltantes (NaN) como retorno zero."""
+    """
+    Calcula a carteira.
+    CORREÇÃO: Garante que 'Diário' trate NaNs (fillna(0)) igual ao Solver.
+    """
     rf_daily = (1 + rf_annual/100)**(1/252) - 1
     fee_daily = (1 + fee_annual/100)**(1/252) - 1
     
@@ -168,11 +156,13 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     
     # 1. Rebalanceamento Diário (Peso Constante)
     if rebal_freq == 'Diário':
-        # fillna(0) impede que a carteira quebre se 1 ativo não tiver cotação no dia
-        gross_ret = asset_returns.fillna(0).dot(initial_weights) + (rf_daily * w_cash_initial)
+        # CORREÇÃO: fillna(0) é essencial aqui.
+        # Se um ativo não tem negociação no dia, o peso dele continua lá, mas retorno é 0.
+        # Sem isso, o produto escalar (.dot) resultaria em NaN para a linha toda.
+        gross_ret = asset_returns.fillna(0.0).dot(initial_weights) + (rf_daily * w_cash_initial)
         return gross_ret - fee_daily
 
-    # 2. Rebalanceamento Periódico (Simulação de Drift)
+    # 2. Rebalanceamento Periódico (Com Drift)
     rebal_dates = set()
     if rebal_freq != 'Sem Rebalanceamento':
         try:
@@ -193,7 +183,7 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     current_cash_w = w_cash_initial
     
     portfolio_rets = []
-    # Preenche NaNs com 0.0 para cálculo vetorial (dia sem pregão pro ativo não muda o valor financeiro dele)
+    # fillna(0) aqui garante consistência também na simulação de loop
     returns_arr = asset_returns.fillna(0.0).values
     dates = asset_returns.index
     n_days = len(dates)
@@ -234,6 +224,7 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     if target_metric == "Max Return (Target Semi-Dev)" and target_semidev_val is not None:
         def semidev_constraint(weights):
             w = np.array(weights)
+            # fillna(0) para igualar lógica
             gross = df_returns.fillna(0).dot(w)
             net = gross - fee_daily
             neg = net[net < 0]
@@ -243,6 +234,7 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
 
     def objective(weights):
         w = np.array(weights)
+        # fillna(0) para igualar lógica
         gross_ret = df_returns.fillna(0).dot(w)
         net_ret = gross_ret - fee_daily
         
@@ -291,8 +283,17 @@ rf_input = c_rf.number_input("Risk Free (% p.a.)", value=10.5, step=0.5)
 mgmt_fee = c_fee.number_input("Mgmt Fee (% p.a.)", value=0.0, step=0.1)
 bench_ticker = st.sidebar.text_input("Benchmark Ticker", value="^BVSP")
 
+# Guarda a chave do widget no session_state para poder alterar via callback
+if 'rebal_freq_key' not in st.session_state:
+    st.session_state['rebal_freq_key'] = "Sem Rebalanceamento"
+
 st.sidebar.subheader("Rebalancing (Simulated)")
-rebal_freq_sim = st.sidebar.selectbox("Frequency:", ["Sem Rebalanceamento", "Mensal", "Trimestral", "Semestral", "Anual", "Diário"], index=0)
+rebal_freq_sim = st.sidebar.selectbox(
+    "Frequency:", 
+    ["Sem Rebalanceamento", "Mensal", "Trimestral", "Semestral", "Anual", "Diário"],
+    index=0,
+    key='rebal_freq_key' # Vincula ao session_state
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Allocation")
@@ -323,9 +324,8 @@ with st.spinner("Fetching market data..."):
 
 if df_prices.empty: st.error("No data found."); st.stop()
 
-# CORREÇÃO: Não usar dropna() globalmente para não cortar ativos com históricos diferentes
+# Calcula retornos
 df_ret = df_prices.ffill().pct_change()
-# Remove apenas a primeira linha que é sempre NaN devido ao pct_change
 df_ret = df_ret.iloc[1:]
 
 if bench_ticker in df_ret.columns: bench_ret = df_ret[bench_ticker]
@@ -337,6 +337,8 @@ assets_ret = df_ret[valid_assets]
 if not valid_assets: st.error("Assets not found in data."); st.stop()
 
 # Carteiras
+# ATENÇÃO: Se o usuário selecionar "Sem Rebalanceamento", o resultado SERÁ DIFERENTE do Solver.
+# Isso é esperado matematicamente (Deriva vs Pesos Fixos).
 ret_orig = calculate_flexible_portfolio(assets_ret, weights_orig, cash_orig, rf_input, mgmt_fee, rebal_freq="Diário")
 ret_sim = calculate_flexible_portfolio(assets_ret, weights_sim, cash_sim, rf_input, mgmt_fee, rebal_freq=rebal_freq_sim)
 
@@ -347,7 +349,7 @@ for t in valid_assets:
     asset_stats[t] = {
         "Beta": m.get("Beta", 1.0), "UpCapture": up, "DownCapture": down, 
         "Vol": m["Volatilidade"], "SemiDev": m["Semi-Desvio"], 
-        "Ret": m["Retorno Anualizado"] # Usa anualizado para o gráfico Scatter
+        "Ret": m["Retorno Anualizado"]
     }
 
 # ==============================================================================
@@ -364,7 +366,6 @@ col_kpi, col_delta = st.columns([3, 1])
 with col_kpi:
     st.markdown(f"#### Performance Metrics (Simulated Rebal: {rebal_freq_sim})")
     
-    # Ordem das métricas para exibir na tabela
     metrics_order = [
         "Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio", 
         "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"
@@ -389,15 +390,17 @@ with col_kpi:
         ), 
         use_container_width=True
     )
+    
+    if rebal_freq_sim != "Diário":
+        st.info(f"ℹ️ Note: Simulated returns differ from Solver targets because of drift ('{rebal_freq_sim}' vs 'Fixed Weights'). Set Frequency to 'Diário' to match Solver exactly.")
 
 with col_delta:
     st.markdown("##### Performance Delta")
-    # Agora destaca o Retorno do Período (o real)
     d_ret = m_sim["Retorno do Período"] - m_orig["Retorno do Período"]
     d_beta = m_sim["Beta"] - m_orig["Beta"]
     
     st.metric("Total Period Return", f"{m_sim['Retorno do Período']:.2%}", delta=f"{d_ret:.2%}")
-    st.metric("Annualized Return", f"{m_sim['Retorno Anualizado']:.2%}", help="Taxa anual projetada (CAGR).")
+    st.metric("Annualized Return", f"{m_sim['Retorno Anualizado']:.2%}")
     st.metric("Portfolio Beta", f"{m_sim['Beta']:.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
 # --- BLOCO B: STRESS TEST ---
@@ -411,7 +414,6 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
         s_start, s_end = "2021-06-01", "2022-07-25"
         period_start, period_end = "2021-06-08", "2022-07-18"
 
-    # Download dedicado para Stress Test (com auto_adjust=True)
     try:
         df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
         if not df_bench_stress.empty:
@@ -493,7 +495,6 @@ with tab1:
     risk_mode = st.radio("Risk Metric (X-Axis):", ["Total Volatility", "Downside Deviation"], horizontal=True)
     x_key = "Vol" if risk_mode == "Total Volatility" else "SemiDev"
     scatter_data = []
-    # Usa Retorno ANUALIZADO para o gráfico scatter ser comparável com Vol Anualizada
     for t, s in asset_stats.items(): scatter_data.append({"Label": t, "X": s[x_key], "Y": s["Ret"], "Type": "Asset", "Size": 8})
     scatter_data.append({"Label": "CURRENT", "X": m_orig["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_orig["Retorno Anualizado"], "Type": "Current Portfolio", "Size": 20})
     scatter_data.append({"Label": "SIMULATED", "X": m_sim["Volatilidade" if x_key=="Vol" else "Semi-Desvio"], "Y": m_sim["Retorno Anualizado"], "Type": "Simulated Portfolio", "Size": 20})
@@ -566,7 +567,8 @@ with tab6:
             opt_weights = res_data['weights']
             opt_assets_saved = res_data['opt_assets']
             fee_daily = (1 + mgmt_fee/100)**(1/252) - 1
-            opt_ret_series = df_opt.fillna(0).dot(opt_weights) - fee_daily
+            # APLICA A MESMA LÓGICA DE FILLNA(0) PARA IGUALAR A SIMULAÇÃO DIÁRIA
+            opt_ret_series = df_opt.fillna(0.0).dot(opt_weights) - fee_daily
             m_opt = calculate_metrics(opt_ret_series, rf_input, bench_ret)
             
             k1, k2, k3 = st.columns(3)
@@ -583,8 +585,9 @@ with tab6:
                 saved_res = st.session_state['solver_result']
                 for i, asset_name in enumerate(saved_res['opt_assets']):
                     if asset_name != "CASH": st.session_state[f"sim_{asset_name}"] = round(saved_res['weights'][i] * 100.0, 2)
-            st.button("Apply to Simulation", on_click=update_weights_callback)
+                # Tenta forçar a simulação para modo diário para alinhar com o solver (Opcional, mas recomendado)
+                st.session_state['rebal_freq_key'] = "Diário" 
+
+            st.button("Apply to Simulation", on_click=update_weights_callback, help="Applies weights and sets Rebalancing to 'Diário' to match solver results.")
         elif 'solver_result' in st.session_state:
             st.error(f"Failed: {st.session_state['solver_result']['message']}")
-        else:
-            st.info("Adjust constraints and click 'Run Solver'.")
