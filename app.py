@@ -352,14 +352,9 @@ def load_portfolio_from_file(uploaded_file):
         return None, str(e)
 
 # ==============================================================================
-# 2B. FUNÇÕES DE RELATÓRIO (PDF)  ✅ (FIX FINAL: compat Plotly + evita eixo em Table)
+# 2B. FUNÇÕES DE RELATÓRIO (PDF)  ✅ (FIX PLOTLY + TABLE/PIE SAFE)
 # ==============================================================================
 def _force_print_theme(fig: go.Figure) -> go.Figure:
-    """
-    Tema 'print-friendly' no EXPORT (PDF) sem mexer na UI do Streamlit.
-    Compatível com versões de Plotly onde 'titlefont' não existe.
-    Evita mexer em eixos quando o gráfico não tem eixos (ex.: go.Table / Pie).
-    """
     f = copy.deepcopy(fig)
 
     f.update_layout(
@@ -371,7 +366,6 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
         margin=dict(l=20, r=20, t=60, b=20)
     )
 
-    # Só ajusta eixos se houver traces cartesianos
     has_cartesian = any(
         getattr(tr, "type", "") in ("scatter", "bar", "histogram", "box", "violin", "heatmap", "candlestick", "ohlc")
         for tr in f.data
@@ -439,20 +433,22 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
 
 
 def fig_to_png_bytes(fig, scale=2):
-    """
-    Retorna bytes PNG ou None (sem quebrar o app).
-    """
     try:
         safe_fig = _force_print_theme(fig)
         return pio.to_image(safe_fig, format="png", scale=scale)
     except Exception as e:
-        # Não derruba o app no Streamlit Cloud
         st.warning(f"Falha ao renderizar figura para PNG (kaleido/plotly): {e}")
         return None
 
 
-def df_to_table_fig(df, title=None, max_rows=40):
+def df_to_table_fig(df, title=None, max_rows=40, round_map=None):
     dfx = df.copy()
+
+    if round_map:
+        for col, dec in round_map.items():
+            if col in dfx.columns:
+                dfx[col] = pd.to_numeric(dfx[col], errors="coerce").round(dec)
+
     if len(dfx) > max_rows:
         dfx = dfx.head(max_rows)
 
@@ -489,10 +485,6 @@ def df_to_table_fig(df, title=None, max_rows=40):
 
 
 def write_pdf_report(output_path, report_title, subtitle, sections):
-    """
-    sections: lista de dicts:
-      {"title": "...", "items": [{"type":"text","value":"..."}, {"type":"image","png_bytes":b"..."}]}
-    """
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
     y = height - 2 * cm
@@ -521,11 +513,19 @@ def write_pdf_report(output_path, report_title, subtitle, sections):
     def draw_text(txt):
         nonlocal y
         c.setFont("Helvetica", 9)
-        for line in str(txt).split("\n"):
+
+        # quebra "manual" em várias linhas para não cortar texto (assets etc)
+        import textwrap
+        lines = []
+        for raw in str(txt).split("\n"):
+            wrapped = textwrap.wrap(raw, width=105) or [""]
+            lines.extend(wrapped)
+
+        for line in lines:
             if y < 2.5 * cm:
                 new_page()
                 c.setFont("Helvetica", 9)
-            c.drawString(2 * cm, y, line[:130])
+            c.drawString(2 * cm, y, line)
             y -= 0.45 * cm
         y -= 0.2 * cm
 
@@ -765,15 +765,33 @@ with col_kpi:
     ]
     keys_present = [k for k in metrics_order if k in m_orig]
 
-    df_comp = pd.DataFrame({
+    df_comp_raw = pd.DataFrame({
         "Metric": keys_present,
         "Current (Fixed W)": [m_orig.get(k, 0.0) for k in keys_present],
         f"Simulated ({rebal_freq_sim})": [m_sim.get(k, 0.0) for k in keys_present],
         "Benchmark": [m_bench.get(k, 0.0) for k in keys_present]
     })
 
-    for c in df_comp.columns[1:]:
-        df_comp[c] = df_comp[c].apply(lambda x: f"{x:.2%}" if abs(x) < 5 and x != 0 else f"{x:.2f}")
+    df_comp = df_comp_raw.copy()
+
+    # ✅ FORMATAÇÃO: Beta/Sharpe/Sortino numéricos (1.30), não %
+    ratio_metrics = {"Beta", "Sharpe", "Sortino"}
+
+    def _fmt_metric(metric_name, x):
+        try:
+            x = float(x)
+        except Exception:
+            return str(x)
+
+        if metric_name in ratio_metrics:
+            return f"{x:.2f}"  # 1.30
+        # % para retornos/vol/semidev/var/cvar/dd
+        return f"{x:.2%}" if abs(x) < 5 and x != 0 else f"{x:.2f}"
+
+    for col in df_comp.columns[1:]:
+        df_comp[col] = [
+            _fmt_metric(df_comp.loc[i, "Metric"], df_comp.loc[i, col]) for i in range(len(df_comp))
+        ]
 
     def highlight_kpi(_val):
         return "background-color: #f0f2f6; font-weight: bold"
@@ -842,9 +860,9 @@ with tab2:
 
     vol_data = []
     for t, s in asset_stats.items():
-        vol = s.get('Vol', 0.0)
-        down = s.get('SemiDev', 0.0)
-        up = s.get('UpsideDev', 0.0)
+        vol = float(s.get('Vol', 0.0))
+        down = float(s.get('SemiDev', 0.0))
+        up = float(s.get('UpsideDev', 0.0))
 
         ratio_tot_down = vol / down if down != 0 else 0.0
         ratio_up_down = up / down if down != 0 else 0.0
@@ -859,19 +877,27 @@ with tab2:
         })
 
     df_vol = pd.DataFrame(vol_data) if vol_data else pd.DataFrame()
-    DF_VOL_TABLE = df_vol.copy()
 
+    # ✅ ORDENAÇÃO: maior Upside/Down -> menor
     if not df_vol.empty:
         df_vol = df_vol.sort_values("Upside/Down Ratio", ascending=False)
 
+    DF_VOL_TABLE = df_vol.copy()
+
+    if not df_vol.empty:
         def color_ratio(val):
-            if val > 1.1:
+            try:
+                v = float(val)
+            except Exception:
+                return ""
+            if v > 1.1:
                 return 'background-color: #d8f5d8; color: black'
-            elif val < 0.9:
+            elif v < 0.9:
                 return 'background-color: #f5d8d8; color: black'
             else:
                 return ''
 
+        # ✅ MENOS POLUIÇÃO: ratios com 2 casas
         st.dataframe(
             df_vol.set_index("Asset").style
             .format({
@@ -945,7 +971,6 @@ with tab5:
     dd_orig = (cum_orig - cum_orig.cummax()) / cum_orig.cummax()
     st.area_chart(dd_orig)
 
-    # Figuras para o PDF
     df_cum = pd.DataFrame({
         "Current (Fixed)": cum_orig,
         f"Simulated ({rebal_freq_sim})": cum_sim,
@@ -1071,7 +1096,13 @@ def build_solver_report_items():
     pie_fig = px.pie(df_w, values="Weight %", names="Asset", title="Optimized Allocation")
     pie_fig.update_traces(marker=dict(colors=px.colors.qualitative.Plotly))
 
-    table_fig = df_to_table_fig(df_w.reset_index(drop=True), title="Optimized Weights", max_rows=60)
+    # Tabela do solver: 2 casas
+    table_fig = df_to_table_fig(
+        df_w.reset_index(drop=True),
+        title="Optimized Weights",
+        max_rows=60,
+        round_map={"Weight %": 2}
+    )
 
     return [
         {"type": "text", "value": f"Objective: {sr.get('target_obj', 'N/A')}"},
@@ -1081,18 +1112,27 @@ def build_solver_report_items():
 
 if st.button("Generate Full PDF Report", type="primary"):
     with st.spinner("Building report... (requires kaleido + reportlab + Pillow)"):
-        # Tabela principal (KPIs)
-        kpi_table_fig = df_to_table_fig(df_comp, title="Performance Metrics (Main Table)", max_rows=60)
+        # Tabela principal (KPIs) - usa df_comp_raw (numérico) para plotar,
+        # mas aqui queremos o texto já formatado. Vamos usar df_comp (texto) para PDF.
+        kpi_table_fig = df_to_table_fig(df_comp.reset_index(drop=True), title="Performance Metrics (Main Table)", max_rows=60)
         kpi_png = fig_to_png_bytes(kpi_table_fig)
 
-        # Risk/Return (2 gráficos)
         rr_total_png = fig_to_png_bytes(FIG_RR_TOTAL) if FIG_RR_TOTAL is not None else None
         rr_down_png = fig_to_png_bytes(FIG_RR_DOWNSIDE) if FIG_RR_DOWNSIDE is not None else None
 
-        # Volatility Quality
         vol_items = []
         if DF_VOL_TABLE is not None and isinstance(DF_VOL_TABLE, pd.DataFrame) and not DF_VOL_TABLE.empty:
-            vol_table_fig = df_to_table_fig(DF_VOL_TABLE.reset_index(drop=True), title="Volatility Quality (Table)", max_rows=60)
+            # ✅ no PDF: também ordenado e 2 casas nos ratios
+            vol_pdf = DF_VOL_TABLE.copy().sort_values("Upside/Down Ratio", ascending=False)
+            vol_table_fig = df_to_table_fig(
+                vol_pdf.reset_index(drop=True),
+                title="Volatility Quality (Table)",
+                max_rows=60,
+                round_map={
+                    "Total Vol": 4, "Downside Vol": 4, "Upside Vol": 4,
+                    "Total/Down Ratio": 2, "Upside/Down Ratio": 2
+                }
+            )
             vol_items.append({"type": "image", "png_bytes": fig_to_png_bytes(vol_table_fig)})
         else:
             vol_items.append({"type": "text", "value": "Volatility Quality: tabela não disponível."})
@@ -1102,15 +1142,14 @@ if st.button("Generate Full PDF Report", type="primary"):
         else:
             vol_items.append({"type": "text", "value": "Volatility Quality: gráfico visual não disponível."})
 
-        # Capture / Corr / History
         capture_png = fig_to_png_bytes(FIG_CAPTURE) if FIG_CAPTURE is not None else None
         corr_png = fig_to_png_bytes(FIG_CORR) if FIG_CORR is not None else None
         hist_cum_png = fig_to_png_bytes(FIG_HIST_CUM) if FIG_HIST_CUM is not None else None
         hist_dd_png = fig_to_png_bytes(FIG_HIST_DD) if FIG_HIST_DD is not None else None
 
-        # Solver
         solver_items = build_solver_report_items()
 
+        # ✅ NÃO CORTAR ASSETS: texto vai quebrar linha via textwrap no draw_text()
         overview_text = (
             f"Benchmark: {bench_ticker}\n"
             f"Period: {pd.to_datetime(start_date).date()} to {pd.to_datetime(end_date).date()}\n"
