@@ -18,6 +18,7 @@ from PIL import Image
 import tempfile
 import os
 import copy
+import textwrap
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -352,7 +353,7 @@ def load_portfolio_from_file(uploaded_file):
         return None, str(e)
 
 # ==============================================================================
-# 2B. FUNÇÕES DE RELATÓRIO (PDF)  ✅ (FIX PLOTLY + TABLE/PIE SAFE)
+# 2B. FUNÇÕES DE RELATÓRIO (PDF)
 # ==============================================================================
 def _force_print_theme(fig: go.Figure) -> go.Figure:
     f = copy.deepcopy(fig)
@@ -372,6 +373,7 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
     )
 
     if has_cartesian:
+        # ✅ compatível com versões de plotly: usar title_font (não titlefont)
         f.update_xaxes(
             showgrid=True,
             gridcolor="rgba(0,0,0,0.08)",
@@ -514,8 +516,6 @@ def write_pdf_report(output_path, report_title, subtitle, sections):
         nonlocal y
         c.setFont("Helvetica", 9)
 
-        # quebra "manual" em várias linhas para não cortar texto (assets etc)
-        import textwrap
         lines = []
         for raw in str(txt).split("\n"):
             wrapped = textwrap.wrap(raw, width=105) or [""]
@@ -773,8 +773,6 @@ with col_kpi:
     })
 
     df_comp = df_comp_raw.copy()
-
-    # ✅ FORMATAÇÃO: Beta/Sharpe/Sortino numéricos (1.30), não %
     ratio_metrics = {"Beta", "Sharpe", "Sortino"}
 
     def _fmt_metric(metric_name, x):
@@ -782,10 +780,8 @@ with col_kpi:
             x = float(x)
         except Exception:
             return str(x)
-
         if metric_name in ratio_metrics:
-            return f"{x:.2f}"  # 1.30
-        # % para retornos/vol/semidev/var/cvar/dd
+            return f"{x:.2f}"
         return f"{x:.2%}" if abs(x) < 5 and x != 0 else f"{x:.2f}"
 
     for col in df_comp.columns[1:]:
@@ -813,7 +809,137 @@ with col_delta:
     st.metric("Annualized Return", f"{m_sim.get('Retorno Anualizado', 0.0):.2%}")
     st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0.0):.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
-# --- ABAS ---
+# ==============================================================================
+# --- BLOCO B: STRESS TEST --- ✅ (REINSERIDO)
+# ==============================================================================
+STRESS_SCENARIO_NAME = None
+STRESS_BENCH_RES = None
+STRESS_CURR_RES = None
+STRESS_SIM_RES = None
+STRESS_USED_PROXY = []
+STRESS_SUMMARY_FIG = None
+
+with st.expander("Stress Test Scenarios (Historical)", expanded=False):
+    scenario = st.radio("Select Scenario:", ["COVID-19 Crash (2020)", "Hawkish Cycle (2021-2022)"], horizontal=True)
+    STRESS_SCENARIO_NAME = scenario
+
+    if scenario == "COVID-19 Crash (2020)":
+        s_start, s_end, period_start, period_end = "2020-01-20", "2020-03-30", "2020-01-23", "2020-03-23"
+    else:
+        s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
+
+    try:
+        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
+        if not df_bench_stress.empty:
+            if isinstance(df_bench_stress.columns, pd.MultiIndex):
+                if 'Close' in df_bench_stress.columns:
+                    df_bench_stress = df_bench_stress['Close']
+                elif 'Close' in df_bench_stress.columns.get_level_values(0):
+                    df_bench_stress = df_bench_stress.xs('Close', axis=1, level=0)
+                else:
+                    df_bench_stress = df_bench_stress.iloc[:, 0]
+            elif 'Close' in df_bench_stress.columns:
+                df_bench_stress = df_bench_stress['Close']
+            else:
+                df_bench_stress = df_bench_stress.iloc[:, 0]
+
+            if isinstance(df_bench_stress, pd.DataFrame):
+                df_bench_stress = df_bench_stress.iloc[:, 0]
+
+            try:
+                df_bench_stress.index = df_bench_stress.index.tz_localize(None)
+            except Exception:
+                pass
+    except Exception:
+        df_bench_stress = pd.Series(dtype=float)
+
+    df_assets_stress = pd.DataFrame()
+    if tickers_input:
+        try:
+            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
+            if not raw_assets.empty:
+                if isinstance(raw_assets.columns, pd.MultiIndex):
+                    if 'Close' in raw_assets.columns:
+                        df_assets_stress = raw_assets['Close']
+                    elif 'Close' in raw_assets.columns.get_level_values(0):
+                        df_assets_stress = raw_assets.xs('Close', axis=1, level=0)
+                    elif 'Close' in raw_assets.columns.get_level_values(1):
+                        df_assets_stress = raw_assets.xs('Close', axis=1, level=1)
+                    else:
+                        df_assets_stress = raw_assets.iloc[:, 0]
+                elif 'Close' in raw_assets.columns:
+                    df_assets_stress = raw_assets[['Close']]
+                    if len(tickers_input) == 1:
+                        df_assets_stress.columns = tickers_input
+                else:
+                    df_assets_stress = raw_assets
+
+                if isinstance(df_assets_stress, pd.Series):
+                    df_assets_stress = df_assets_stress.to_frame(name=tickers_input[0])
+
+                try:
+                    df_assets_stress.index = df_assets_stress.index.tz_localize(None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if isinstance(df_bench_stress, pd.Series) and not df_bench_stress.empty:
+        mask_b = (df_bench_stress.index >= pd.to_datetime(period_start)) & (df_bench_stress.index <= pd.to_datetime(period_end))
+        bench_cut = df_bench_stress.loc[mask_b]
+        if not bench_cut.empty:
+            bench_res = (bench_cut.iloc[-1] / bench_cut.iloc[0]) - 1
+            days_stress = (pd.to_datetime(period_end) - pd.to_datetime(period_start)).days
+            fee_factor_stress = (1 + mgmt_fee / 100.0) ** (days_stress / 365.0) - 1
+
+            perfs, used_proxy = {}, []
+            for t in tickers_input:
+                asset_return, has_data = 0.0, False
+                if isinstance(df_assets_stress, pd.DataFrame) and (t in df_assets_stress.columns):
+                    mask_a = (df_assets_stress.index >= pd.to_datetime(period_start)) & (df_assets_stress.index <= pd.to_datetime(period_end))
+                    s_asset = df_assets_stress.loc[mask_a, t].dropna()
+                    if not s_asset.empty:
+                        asset_return, has_data = (s_asset.iloc[-1] / s_asset.iloc[0]) - 1, True
+
+                if not has_data:
+                    beta_proxy = asset_stats.get(t, {}).get("Beta", 1.0)
+                    asset_return = beta_proxy * bench_res
+                    used_proxy.append(t)
+
+                perfs[t] = asset_return
+
+            s_orig = sum([(weights_orig.get(t, 0.0) / 100.0) * perfs[t] for t in tickers_input]) - fee_factor_stress
+            s_sim = sum([(weights_sim.get(t, 0.0) / 100.0) * perfs[t] for t in tickers_input]) - fee_factor_stress
+
+            STRESS_BENCH_RES = float(bench_res)
+            STRESS_CURR_RES = float(s_orig)
+            STRESS_SIM_RES = float(s_sim)
+            STRESS_USED_PROXY = used_proxy
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"Benchmark ({scenario.split()[0]})", f"{bench_res:.2%}", delta="Market Move", delta_color="inverse")
+            c2.metric("Current Portfolio", f"{s_orig:.2%}", delta=f"{(s_orig - bench_res):.2%} vs Bench")
+            c3.metric("Simulated Portfolio", f"{s_sim:.2%}", delta=f"{(s_sim - s_orig):.2%} vs Current")
+
+            if used_proxy:
+                st.caption(f"⚠️ Proxy used for: {', '.join(used_proxy)}")
+
+            # figura pro PDF (resumo)
+            df_st = pd.DataFrame({
+                "Item": ["Benchmark", "Current", "Simulated"],
+                "Return": [bench_res, s_orig, s_sim]
+            })
+            STRESS_SUMMARY_FIG = px.bar(df_st, x="Item", y="Return", title=f"Stress Test Summary - {scenario}")
+            STRESS_SUMMARY_FIG.update_layout(yaxis_tickformat=".2%")
+
+        else:
+            st.warning("Benchmark data empty for this range.")
+    else:
+        st.warning("Insufficient Benchmark data.")
+
+# ==============================================================================
+# --- BLOCO C: ABAS ---
+# ==============================================================================
 st.markdown("---")
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["Risk vs Return", "Volatility Quality", "Capture Ratios", "Correlation Matrix", "History", "Portfolio Solver"]
@@ -828,6 +954,9 @@ FIG_CORR = None
 FIG_HIST_CUM = None
 FIG_HIST_DD = None
 DF_VOL_TABLE = None
+SOLVER_PIE_FIG = None
+SOLVER_TABLE_FIG = None
+SOLVER_OBJECTIVE = None
 
 def _risk_return_fig(mode):
     _x_key = "Vol" if mode == "Total Volatility" else "SemiDev"
@@ -848,7 +977,7 @@ def _risk_return_fig(mode):
 
 with tab1:
     risk_mode = st.radio("Risk Metric (X-Axis):", ["Total Volatility", "Downside Deviation"], horizontal=True)
-    fig1 = _risk_return_fig(risk_mode)
+    fig1 = _risk_return_fig("Total Volatility" if risk_mode == "Total Volatility" else "Downside Deviation")
     st.plotly_chart(fig1, use_container_width=True)
 
     FIG_RR_TOTAL = _risk_return_fig("Total Volatility")
@@ -877,8 +1006,6 @@ with tab2:
         })
 
     df_vol = pd.DataFrame(vol_data) if vol_data else pd.DataFrame()
-
-    # ✅ ORDENAÇÃO: maior Upside/Down -> menor
     if not df_vol.empty:
         df_vol = df_vol.sort_values("Upside/Down Ratio", ascending=False)
 
@@ -897,7 +1024,6 @@ with tab2:
             else:
                 return ''
 
-        # ✅ MENOS POLUIÇÃO: ratios com 2 casas
         st.dataframe(
             df_vol.set_index("Asset").style
             .format({
@@ -1027,6 +1153,8 @@ with tab6:
     with col_res:
         if 'solver_result' in st.session_state and st.session_state['solver_result']['success']:
             sr = st.session_state['solver_result']
+            SOLVER_OBJECTIVE = sr.get("target_obj", None)
+
             opt_weights = sr['weights']
             opt_assets_saved = sr['opt_assets']
 
@@ -1039,18 +1167,29 @@ with tab6:
             k2.metric("Sortino Ratio", f"{m_opt.get('Sortino', 0.0):.2f}")
             k3.metric("Downside Vol", f"{m_opt.get('Semi-Desvio', 0.0):.2%}")
 
-            df_w = pd.DataFrame({"Asset": opt_assets_saved, "Weight": opt_weights * 100.0}).query("Weight > 0.01")
+            df_w = pd.DataFrame({"Asset": opt_assets_saved, "Weight %": opt_weights * 100.0}).query("`Weight %` > 0.01")
+            df_w = df_w.sort_values("Weight %", ascending=False)
+
             c_chart, c_table = st.columns([1, 1])
 
-            solver_pie_fig = px.pie(df_w, values="Weight", names="Asset", title="Allocation")
+            solver_pie_fig = px.pie(df_w, values="Weight %", names="Asset", title="Allocation")
             solver_pie_fig.update_traces(marker=dict(colors=px.colors.qualitative.Plotly))
+            SOLVER_PIE_FIG = solver_pie_fig
+
+            solver_table_fig = df_to_table_fig(
+                df_w.reset_index(drop=True),
+                title="Optimized Weights",
+                max_rows=60,
+                round_map={"Weight %": 2}
+            )
+            SOLVER_TABLE_FIG = solver_table_fig
 
             with c_chart:
                 st.plotly_chart(solver_pie_fig, use_container_width=True)
 
             with c_table:
                 st.dataframe(
-                    df_w.sort_values("Weight", ascending=False).style.format({"Weight": "{:.2f}%"}),
+                    df_w.style.format({"Weight %": "{:.2f}%"}),
                     use_container_width=True,
                     hide_index=True
                 )
@@ -1067,62 +1206,41 @@ with tab6:
             st.error(f"Failed: {st.session_state['solver_result']['message']}")
 
 # ==============================================================================
-# 6. EXPORT RELATÓRIO (PDF) - COMPLETO
+# 6. EXPORT RELATÓRIO (PDF) - COMPLETO ✅ (inclui Stress Test)
 # ==============================================================================
 st.markdown("---")
 st.subheader("📄 Export Report (PDF)")
 
 st.caption(
-    "O relatório inclui: tabela principal, Risk/Return (Total Vol e Downside), Volatility Quality, "
+    "O relatório inclui: tabela principal, Stress Test, Risk/Return (Total Vol e Downside), Volatility Quality, "
     "Capture Ratios, Correlation Matrix, History e Portfolio Solver."
 )
 
-def build_solver_report_items():
-    if 'solver_result' not in st.session_state:
-        return [{"type": "text", "value": "Solver: nenhum resultado encontrado (execute o solver para incluir nesta seção)."}]
-
-    sr = st.session_state['solver_result']
-    if not sr.get('success', False):
-        return [{"type": "text", "value": f"Solver: falhou - {sr.get('message', '')}"}]
-
-    opt_assets_saved = sr.get('opt_assets', [])
-    opt_weights = sr.get('weights', [])
-    if opt_assets_saved is None or opt_weights is None:
-        return [{"type": "text", "value": "Solver: resultado inválido."}]
-
-    df_w = pd.DataFrame({"Asset": opt_assets_saved, "Weight %": np.array(opt_weights) * 100.0})
-    df_w = df_w[df_w["Weight %"] > 0.01].sort_values("Weight %", ascending=False)
-
-    pie_fig = px.pie(df_w, values="Weight %", names="Asset", title="Optimized Allocation")
-    pie_fig.update_traces(marker=dict(colors=px.colors.qualitative.Plotly))
-
-    # Tabela do solver: 2 casas
-    table_fig = df_to_table_fig(
-        df_w.reset_index(drop=True),
-        title="Optimized Weights",
-        max_rows=60,
-        round_map={"Weight %": 2}
-    )
-
-    return [
-        {"type": "text", "value": f"Objective: {sr.get('target_obj', 'N/A')}"},
-        {"type": "image", "png_bytes": fig_to_png_bytes(pie_fig)},
-        {"type": "image", "png_bytes": fig_to_png_bytes(table_fig)},
-    ]
-
 if st.button("Generate Full PDF Report", type="primary"):
     with st.spinner("Building report... (requires kaleido + reportlab + Pillow)"):
-        # Tabela principal (KPIs) - usa df_comp_raw (numérico) para plotar,
-        # mas aqui queremos o texto já formatado. Vamos usar df_comp (texto) para PDF.
+        # Tabela principal
         kpi_table_fig = df_to_table_fig(df_comp.reset_index(drop=True), title="Performance Metrics (Main Table)", max_rows=60)
         kpi_png = fig_to_png_bytes(kpi_table_fig)
 
         rr_total_png = fig_to_png_bytes(FIG_RR_TOTAL) if FIG_RR_TOTAL is not None else None
         rr_down_png = fig_to_png_bytes(FIG_RR_DOWNSIDE) if FIG_RR_DOWNSIDE is not None else None
 
+        # Stress Test (fig + texto)
+        stress_items = []
+        if STRESS_SCENARIO_NAME is None:
+            stress_items.append({"type": "text", "value": "Stress Test: não executado."})
+        else:
+            stress_items.append({"type": "text", "value": f"Scenario: {STRESS_SCENARIO_NAME}"})
+            if STRESS_BENCH_RES is not None:
+                stress_items.append({"type": "text", "value": f"Benchmark: {STRESS_BENCH_RES:.2%} | Current: {STRESS_CURR_RES:.2%} | Simulated: {STRESS_SIM_RES:.2%}"})
+            if STRESS_USED_PROXY:
+                stress_items.append({"type": "text", "value": f"Proxy used for: {', '.join(STRESS_USED_PROXY)}"})
+            if STRESS_SUMMARY_FIG is not None:
+                stress_items.append({"type": "image", "png_bytes": fig_to_png_bytes(STRESS_SUMMARY_FIG)})
+
+        # Volatility Quality (ordem + arredondamento)
         vol_items = []
         if DF_VOL_TABLE is not None and isinstance(DF_VOL_TABLE, pd.DataFrame) and not DF_VOL_TABLE.empty:
-            # ✅ no PDF: também ordenado e 2 casas nos ratios
             vol_pdf = DF_VOL_TABLE.copy().sort_values("Upside/Down Ratio", ascending=False)
             vol_table_fig = df_to_table_fig(
                 vol_pdf.reset_index(drop=True),
@@ -1139,17 +1257,24 @@ if st.button("Generate Full PDF Report", type="primary"):
 
         if FIG_VOL_VISUAL is not None:
             vol_items.append({"type": "image", "png_bytes": fig_to_png_bytes(FIG_VOL_VISUAL)})
-        else:
-            vol_items.append({"type": "text", "value": "Volatility Quality: gráfico visual não disponível."})
 
         capture_png = fig_to_png_bytes(FIG_CAPTURE) if FIG_CAPTURE is not None else None
         corr_png = fig_to_png_bytes(FIG_CORR) if FIG_CORR is not None else None
         hist_cum_png = fig_to_png_bytes(FIG_HIST_CUM) if FIG_HIST_CUM is not None else None
         hist_dd_png = fig_to_png_bytes(FIG_HIST_DD) if FIG_HIST_DD is not None else None
 
-        solver_items = build_solver_report_items()
+        # Solver
+        solver_items = []
+        if SOLVER_OBJECTIVE is not None:
+            solver_items.append({"type": "text", "value": f"Objective: {SOLVER_OBJECTIVE}"})
+        else:
+            solver_items.append({"type": "text", "value": "Solver: nenhum resultado encontrado (execute o solver para incluir nesta seção)."})
 
-        # ✅ NÃO CORTAR ASSETS: texto vai quebrar linha via textwrap no draw_text()
+        if SOLVER_PIE_FIG is not None:
+            solver_items.append({"type": "image", "png_bytes": fig_to_png_bytes(SOLVER_PIE_FIG)})
+        if SOLVER_TABLE_FIG is not None:
+            solver_items.append({"type": "image", "png_bytes": fig_to_png_bytes(SOLVER_TABLE_FIG)})
+
         overview_text = (
             f"Benchmark: {bench_ticker}\n"
             f"Period: {pd.to_datetime(start_date).date()} to {pd.to_datetime(end_date).date()}\n"
@@ -1161,6 +1286,7 @@ if st.button("Generate Full PDF Report", type="primary"):
         sections = [
             {"title": "Overview", "items": [{"type": "text", "value": overview_text}]},
             {"title": "Main Table (KPIs)", "items": [{"type": "image", "png_bytes": kpi_png}] if kpi_png else [{"type": "text", "value": "KPIs: falha ao exportar imagem (kaleido/plotly)."}]},
+            {"title": "Stress Test (Historical)", "items": stress_items},
             {"title": "Risk vs Return - Total Volatility", "items": [{"type": "image", "png_bytes": rr_total_png}] if rr_total_png else [{"type": "text", "value": "Risk/Return (Total): não disponível."}]},
             {"title": "Risk vs Return - Downside Deviation", "items": [{"type": "image", "png_bytes": rr_down_png}] if rr_down_png else [{"type": "text", "value": "Risk/Return (Downside): não disponível."}]},
             {"title": "Volatility Quality", "items": vol_items},
