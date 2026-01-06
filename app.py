@@ -7,17 +7,17 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from scipy.optimize import minimize
 import io
-==============================================================================
+# ==============================================================================
 1. CONFIGURAÇÃO DA PÁGINA
-==============================================================================
+# ==============================================================================
 st.set_page_config(
 page_title="Portfolio Risk Management System",
 layout="wide",
 initial_sidebar_state="expanded"
 )
-==============================================================================
+# ==============================================================================
 2. FUNÇÕES CORE (BACKEND)
-==============================================================================
+# ==============================================================================
 @st.cache_data
 def get_market_data(tickers, start_date, end_date):
 if not tickers: return pd.DataFrame()
@@ -557,3 +557,4 @@ with col_res:
             st.session_state['rebal_freq_key'] = "Diário" 
         st.button("Apply to Simulation", on_click=update_weights_callback, help="Sets Rebalancing to 'Diário' to match solver.")
     elif 'solver_result' in st.session_state: st.error(f"Failed: {st.session_state['solver_result']['message']}")
+
