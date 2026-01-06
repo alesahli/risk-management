@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from scipy.optimize import minimize
 import io
 # ==============================================================================
-1. CONFIGURAÇÃO DA PÁGINA
+# 1. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
 st.set_page_config(
 page_title="Portfolio Risk Management System",
@@ -16,7 +16,7 @@ layout="wide",
 initial_sidebar_state="expanded"
 )
 # ==============================================================================
-2. FUNÇÕES CORE (BACKEND)
+# 2. FUNÇÕES CORE (BACKEND)
 # ==============================================================================
 @st.cache_data
 def get_market_data(tickers, start_date, end_date):
@@ -235,9 +235,9 @@ except ImportError: return None, "Servidor sem suporte a .xlsx. Por favor use o 
 
     return portfolio, None
 except Exception as e: return None, str(e)
-==============================================================================
-3. BARRA LATERAL (INPUTS)
-==============================================================================
+# ==============================================================================
+# 3. BARRA LATERAL (INPUTS)
+# ==============================================================================
 st.sidebar.header("Portfolio Configuration")
 with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
 df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
@@ -302,9 +302,9 @@ if total_orig > 0:
     df_export = pd.DataFrame(list(weights_orig.items()), columns=["Ativo", "Peso"])
     csv_exp = df_export.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
     st.sidebar.download_button("Export Current Portfolio (CSV)", data=csv_exp, file_name="my_portfolio.csv", mime="text/csv")
-    ==============================================================================
-4. PROCESSAMENTO E CÁLCULOS
-==============================================================================
+    # ==============================================================================
+# 4. PROCESSAMENTO E CÁLCULOS
+# ==============================================================================
 all_tickers = list(set(tickers_input + [bench_ticker]))
 with st.spinner("Fetching market data..."):
 df_prices = get_market_data(all_tickers, start_date, end_date)
@@ -332,9 +332,9 @@ asset_stats[t] = {
 "UpsideDev": m.get("Upside-Desvio", 0.0),
 "Ret": m.get("Retorno Anualizado", 0.0)
 }
-==============================================================================
-5. DASHBOARD
-==============================================================================
+# ==============================================================================
+# 5. DASHBOARD
+# ==============================================================================
 st.title("Portfolio Risk Management System")
 --- BLOCO A: KPIs ---
 m_orig = calculate_metrics(ret_orig, rf_input, bench_ret)
@@ -557,4 +557,5 @@ with col_res:
             st.session_state['rebal_freq_key'] = "Diário" 
         st.button("Apply to Simulation", on_click=update_weights_callback, help="Sets Rebalancing to 'Diário' to match solver.")
     elif 'solver_result' in st.session_state: st.error(f"Failed: {st.session_state['solver_result']['message']}")
+
 
