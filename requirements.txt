@@ -1,6 +1,8 @@
 streamlit
+yfinance
 pandas
 numpy
-scipy
 plotly
-yfinance>=0.2.50
+scipy
+fpdf2
+kaleido==0.2.1
