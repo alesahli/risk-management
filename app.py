@@ -205,6 +205,47 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6, options={'maxiter': 1000})
     return result
 
+# --- FUNÇÃO DE EXPORTAÇÃO HTML PROFISSIONAL ---
+def generate_interactive_report(df_comp_fmt, figures_dict):
+    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+    html_content = f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        <style>
+            body {{ background-color: #f4f7f9; padding: 40px; font-family: sans-serif; }}
+            .header-box {{ background: #1e3c72; color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; text-align: center; }}
+            .card {{ border: none; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 30px; background: white; padding: 20px; }}
+            .table {{ font-size: 0.9rem; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header-box">
+                <h1>Portfolio Risk Report</h1>
+                <p>Relatório Consolidado de Gestão de Risco</p>
+                <small>Gerado em: {now_str}</small>
+            </div>
+            
+            <div class="card">
+                <h3>Métricas de Performance</h3>
+                {df_comp_fmt.to_html(classes='table table-striped table-hover', index=False)}
+            </div>
+    """
+    for title, fig in figures_dict.items():
+        if fig is not None:
+            html_content += f"""
+            <div class="card">
+                <h3>{title}</h3>
+                {fig.to_html(full_html=False, include_plotlyjs=False)}
+            </div>
+            """
+    html_content += "</div></body></html>"
+    return html_content
+
+# --- FUNÇÃO DE IMPORTAÇÃO ---
 def load_portfolio_from_file(uploaded_file):
     try:
         df = pd.DataFrame()
@@ -220,13 +261,11 @@ def load_portfolio_from_file(uploaded_file):
             except ImportError: return None, "Servidor sem suporte a .xlsx. Por favor use o Template CSV."
         
         if df.empty: return None, "Não foi possível ler o arquivo. Verifique se é um CSV válido."
-
         df.columns = [str(c).lower().strip() for c in df.columns]
         col_ticker = next((c for c in df.columns if c in ['ativo', 'ticker', 'asset', 'symbol', 'código']), None)
         col_weight = next((c for c in df.columns if c in ['peso', 'weight', 'alocacao', '%', 'valor']), None)
         
         if not col_ticker or not col_weight: return None, f"Colunas 'Ativo' e 'Peso' não encontradas."
-        
         portfolio = {}
         for _, row in df.iterrows():
             t = str(row[col_ticker]).strip().upper()
@@ -234,94 +273,18 @@ def load_portfolio_from_file(uploaded_file):
             try: w = float(val_raw)
             except: w = 0.0
             if w > 0: portfolio[t] = w
-            
         total_w = sum(portfolio.values())
         if total_w <= 1.05 and total_w > 0:
              for k in portfolio: portfolio[k] = portfolio[k] * 100.0
-
         return portfolio, None
     except Exception as e: return None, str(e)
-
-# --- NOVA FUNÇÃO DE EXPORTAÇÃO HTML ---
-def generate_interactive_report(df_comp, figures_dict, weights_orig, weights_sim):
-    """Gera um documento HTML moderno e interativo com Bootstrap 5."""
-    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
-    
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Relatório Executivo de Portfólio</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-        <style>
-            body {{ background-color: #f4f7f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; }}
-            .header-banner {{ background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); color: white; padding: 40px 0; margin-bottom: 30px; }}
-            .card {{ border: none; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 30px; }}
-            .table-styled {{ font-size: 0.9rem; }}
-            .table-styled thead {{ background-color: #f8f9fa; }}
-            .footer {{ text-align: center; padding: 20px; color: #777; font-size: 0.8rem; }}
-            .section-title {{ border-left: 5px solid #1e3c72; padding-left: 15px; margin-bottom: 25px; font-weight: bold; color: #1e3c72; }}
-        </style>
-    </head>
-    <body>
-        <div class="header-banner">
-            <div class="container text-center">
-                <h1 class="display-5 fw-bold">Executive Portfolio Risk Analysis</h1>
-                <p class="lead mb-0">Relatório Consolidado de Gestão e Performance</p>
-                <small>Gerado em: {now_str}</small>
-            </div>
-        </div>
-
-        <div class="container">
-            <!-- KPIs -->
-            <div class="row">
-                <div class="col-12">
-                    <h3 class="section-title">Métricas de Performance e Risco</h3>
-                    <div class="card p-4">
-                        <div class="table-responsive">
-                            {df_comp.to_html(classes='table table-hover table-styled', index=False)}
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Gráficos -->
-    """
-    
-    # Adicionar Gráficos Plotly
-    for title, fig in figures_dict.items():
-        chart_html = fig.to_html(full_html=False, include_plotlyjs=False)
-        html_content += f"""
-            <div class="row">
-                <div class="col-12">
-                    <h3 class="section-title">{title}</h3>
-                    <div class="card p-3">
-                        {chart_html}
-                    </div>
-                </div>
-            </div>
-        """
-
-    html_content += """
-            <div class="footer">
-                <p>Relatório gerado automaticamente pelo Portfolio Risk Management System.</p>
-                <p>&copy; 2024 - Risk Intelligence System</p>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return html_content
 
 # ==============================================================================
 # 3. BARRA LATERAL (INPUTS)
 # ==============================================================================
 st.sidebar.header("Portfolio Configuration")
 
-with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
+with st.sidebar.expander("📂 Import / Export Portfolio", expanded=False):
     df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
     csv_template = df_template.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
     st.download_button(label="Download Template (CSV)", data=csv_template, file_name="portfolio_template.csv", mime="text/csv", use_container_width=True)
@@ -333,8 +296,7 @@ with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
             st.session_state['imported_portfolio'] = portfolio_dict
             st.session_state['tickers_text_key'] = ", ".join(portfolio_dict.keys())
             st.success(f"Carregado: {len(portfolio_dict)} ativos.")
-        else:
-            st.error(f"Erro: {error_msg}")
+        else: st.error(f"Erro: {error_msg}")
 
 default_tickers_text = "VALE3.SA, PETR4.SA, BPAC11.SA"
 if 'tickers_text_key' in st.session_state: default_tickers_text = st.session_state['tickers_text_key']
@@ -388,6 +350,11 @@ if tickers_input:
     
     cash_orig = 100 - total_orig; cash_sim = 100 - total_sim
     st.sidebar.info(f"Cash Position: Current {cash_orig:.0f}% | Simulated {cash_sim:.0f}%")
+    
+    if total_orig > 0:
+        df_export = pd.DataFrame(list(weights_orig.items()), columns=["Ativo", "Peso"])
+        csv_exp = df_export.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
+        st.sidebar.download_button("Export Current Portfolio (CSV)", data=csv_exp, file_name="my_portfolio.csv", mime="text/csv", use_container_width=True)
 
 # ==============================================================================
 # 4. PROCESSAMENTO E CÁLCULOS
@@ -409,6 +376,7 @@ assets_ret = df_ret[valid_assets]
 
 if not valid_assets: st.error("Assets not found in data."); st.stop()
 
+# Simulações de Retorno
 ret_orig = calculate_flexible_portfolio(assets_ret, weights_orig, cash_orig, rf_input, mgmt_fee, rebal_freq="Diário")
 ret_sim = calculate_flexible_portfolio(assets_ret, weights_sim, cash_sim, rf_input, mgmt_fee, rebal_freq=rebal_freq_sim)
 
@@ -423,106 +391,152 @@ for t in valid_assets:
         "UpsideDev": m.get("Upside-Desvio", 0.0), "Ret": m.get("Retorno Anualizado", 0.0)
     }
 
-# ==============================================================================
-# 5. DASHBOARD & GRÁFICOS (ARMAZENADOS PARA RELATÓRIO)
-# ==============================================================================
-st.title("Portfolio Risk Management System")
-
-# KPIs
+# Métricas Comparativas
 m_orig = calculate_metrics(ret_orig, rf_input, bench_ret)
 m_sim = calculate_metrics(ret_sim, rf_input, bench_ret)
 m_bench = calculate_metrics(bench_ret, rf_input, bench_ret)
 
+# --- NOVA LÓGICA DE FORMATAÇÃO (BETA E SHARPE COMO NÚMEROS) ---
+metrics_order = ["Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio", "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"]
+keys_present = [k for k in metrics_order if k in m_orig]
+
+def format_value(metric_name, val):
+    if metric_name in ["Beta", "Sharpe", "Sortino"]: return f"{val:.2f}"
+    return f"{val:.2%}"
+
+df_comp_display = pd.DataFrame({
+    "Metric": keys_present, 
+    "Current (Fixed W)": [format_value(k, m_orig.get(k, 0)) for k in keys_present], 
+    f"Simulated ({rebal_freq_sim})": [format_value(k, m_sim.get(k, 0)) for k in keys_present], 
+    "Benchmark": [format_value(k, m_bench.get(k, 0)) for k in keys_present]
+})
+
+# ==============================================================================
+# 5. DASHBOARD
+# ==============================================================================
+st.title("Portfolio Risk Management System")
+
 col_kpi, col_delta = st.columns([3, 1])
 with col_kpi:
-    metrics_order = ["Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio", "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"]
-    keys_present = [k for k in metrics_order if k in m_orig]
-    
-    df_comp = pd.DataFrame({
-        "Metric": keys_present, 
-        "Current (Fixed W)": [m_orig.get(k, 0) for k in keys_present], 
-        f"Simulated ({rebal_freq_sim})": [m_sim.get(k, 0) for k in keys_present], 
-        "Benchmark": [m_bench.get(k, 0) for k in keys_present]
-    })
-    
-    # Criar versão formatada para exibição
-    df_comp_fmt = df_comp.copy()
-    for c in df_comp_fmt.columns[1:]:
-        df_comp_fmt[c] = df_comp_fmt[c].apply(lambda x: f"{x:.2%}" if abs(x)<5 and x!=0 else f"{x:.2f}")
-    
     st.markdown(f"#### Performance Metrics (Simulated Rebal: {rebal_freq_sim})")
-    st.dataframe(df_comp_fmt.set_index("Metric"), use_container_width=True)
+    st.dataframe(df_comp_display.set_index("Metric"), use_container_width=True)
+    if rebal_freq_sim != "Diário": st.info(f"ℹ️ Drift active: '{rebal_freq_sim}' vs 'Fixed Weights'.")
 
 with col_delta:
-    st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0):.2f}")
-    st.metric("Ann. Return", f"{m_sim.get('Retorno Anualizado', 0):.2%}")
+    st.markdown("##### Performance Delta")
+    d_ret = m_sim.get("Retorno do Período", 0) - m_orig.get("Retorno do Período", 0)
+    d_beta = m_sim.get("Beta", 0) - m_orig.get("Beta", 0)
+    st.metric("Total Period Return", f"{m_sim.get('Retorno do Período', 0):.2%}", delta=f"{d_ret:.2%}")
+    st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0):.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
-# --- TABELAS E GRÁFICOS ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Risk vs Return", "Volatility Quality", "Capture Ratios", "Correlation", "History", "Solver"])
+# --- BLOCO B: STRESS TEST ---
+with st.expander("Stress Test Scenarios (Historical)", expanded=False):
+    scenario = st.radio("Select Scenario:", ["COVID-19 Crash (2020)", "Hawkish Cycle (2021-2022)"], horizontal=True)
+    if scenario == "COVID-19 Crash (2020)": s_start, s_end, period_start, period_end = "2020-01-20", "2020-03-30", "2020-01-23", "2020-03-23"
+    else: s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
 
-# Fig 1: Risk vs Return
-x_key = "Vol" # Padrão
-scatter_data = []
-for t, s in asset_stats.items(): scatter_data.append({"Label": t, "X": s[x_key], "Y": s["Ret"], "Type": "Asset", "Size": 8})
-scatter_data.append({"Label": "CURRENT", "X": m_orig.get("Volatilidade", 0), "Y": m_orig.get("Retorno Anualizado", 0), "Type": "Current Portfolio", "Size": 20})
-scatter_data.append({"Label": "SIMULATED", "X": m_sim.get("Volatilidade", 0), "Y": m_sim.get("Retorno Anualizado", 0), "Type": "Simulated Portfolio", "Size": 20})
-scatter_data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade", 0), "Y": m_bench.get("Retorno Anualizado", 0), "Type": "Benchmark", "Size": 12})
-fig1 = px.scatter(pd.DataFrame(scatter_data), x="X", y="Y", color="Type", size="Size", text="Label", title="Risk vs Return Analysis")
-with tab1: st.plotly_chart(fig1, use_container_width=True)
+    df_bench_stress = get_market_data([bench_ticker], s_start, s_end)
+    df_assets_stress = get_market_data(tickers_input, s_start, s_end)
 
-# Fig 2: Vol Quality
-q_data = [{"Label": t, "Vol": s["Vol"], "SemiDev": s["SemiDev"]} for t, s in asset_stats.items()]
-df_q = pd.DataFrame(q_data)
-fig2 = px.scatter(df_q, x="Vol", y="SemiDev", text="Label", title="Volatility Quality (Downside vs Total)")
-with tab2: st.plotly_chart(fig2, use_container_width=True)
+    if not df_bench_stress.empty:
+        mask_b = (df_bench_stress.index >= pd.to_datetime(period_start)) & (df_bench_stress.index <= pd.to_datetime(period_end))
+        bench_cut = df_bench_stress.loc[mask_b]
+        if not bench_cut.empty:
+            bench_res = (bench_cut.iloc[-1, 0] / bench_cut.iloc[0, 0]) - 1
+            perfs, used_proxy = {}, []
+            for t in tickers_input:
+                asset_return, has_data = 0.0, False
+                if t in df_assets_stress.columns:
+                    mask_a = (df_assets_stress.index >= pd.to_datetime(period_start)) & (df_assets_stress.index <= pd.to_datetime(period_end))
+                    s_asset = df_assets_stress.loc[mask_a, t].dropna()
+                    if not s_asset.empty: asset_return, has_data = (s_asset.iloc[-1] / s_asset.iloc[0]) - 1, True
+                if not has_data:
+                    beta_proxy = asset_stats.get(t, {}).get("Beta", 1.0)
+                    asset_return = beta_proxy * bench_res
+                    used_proxy.append(t)
+                perfs[t] = asset_return
+            s_orig = sum([weights_orig.get(t, 0)/100 * perfs[t] for t in tickers_input])
+            s_sim = sum([weights_sim.get(t, 0)/100 * perfs[t] for t in tickers_input])
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"Benchmark", f"{bench_res:.2%}")
+            c2.metric("Current Portfolio", f"{s_orig:.2%}")
+            c3.metric("Simulated Portfolio", f"{s_sim:.2%}")
+            if used_proxy: st.caption(f"⚠️ Proxy used for: {', '.join(used_proxy)}")
 
-# Fig 3: Capture Ratios
-up_s, down_s = calculate_capture_ratios(ret_sim, bench_ret)
-c_data = [{"Label": t, "Up": s["UpCapture"], "Down": s["DownCapture"], "Type": "Asset"} for t, s in asset_stats.items()]
-c_data.append({"Label": "SIMULATED", "Up": up_s, "Down": down_s, "Type": "Portfolio"})
-fig3 = px.scatter(pd.DataFrame(c_data), x="Down", y="Up", text="Label", color="Type", title="Upside vs Downside Capture")
-fig3.add_vline(x=100, line_dash="dash"); fig3.add_hline(y=100, line_dash="dash")
-with tab3: st.plotly_chart(fig3, use_container_width=True)
+# --- BLOCO C: ABAS GRÁFICAS ---
+st.markdown("---")
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Risk vs Return", "Volatility Quality", "Capture Ratios", "Correlation Matrix", "History", "Portfolio Solver"])
 
-# Fig 4: Correlation
-fig4 = px.imshow(assets_ret.corr(), text_auto=".2f", color_continuous_scale="RdYlGn", title="Correlation Matrix")
-with tab4: st.plotly_chart(fig4, use_container_width=True)
+with tab1:
+    scatter_data = []
+    for t, s in asset_stats.items(): scatter_data.append({"Label": t, "X": s["Vol"], "Y": s["Ret"], "Type": "Asset", "Size": 8})
+    scatter_data.append({"Label": "CURRENT", "X": m_orig.get("Volatilidade", 0), "Y": m_orig.get("Retorno Anualizado", 0), "Type": "Current Portfolio", "Size": 20})
+    scatter_data.append({"Label": "SIMULATED", "X": m_sim.get("Volatilidade", 0), "Y": m_sim.get("Retorno Anualizado", 0), "Type": "Simulated Portfolio", "Size": 20})
+    fig1 = px.scatter(pd.DataFrame(scatter_data), x="X", y="Y", color="Type", size="Size", text="Label", title="Risk vs Return Analysis")
+    st.plotly_chart(fig1, use_container_width=True)
 
-# Fig 5: History
-cum_sim, cum_bench = (1 + ret_sim).cumprod(), (1 + bench_ret).cumprod()
-df_hist = pd.DataFrame({"Simulated": cum_sim, "Benchmark": cum_bench})
-fig5 = px.line(df_hist, title="Cumulative Performance")
-with tab5: st.plotly_chart(fig5, use_container_width=True)
+with tab2:
+    q_data = [{"Label": t, "Vol": s["Vol"], "SemiDev": s["SemiDev"]} for t, s in asset_stats.items()]
+    df_q = pd.DataFrame(q_data)
+    fig2 = px.scatter(df_q, x="Vol", y="SemiDev", text="Label", title="Vol Quality")
+    st.plotly_chart(fig2, use_container_width=True)
+
+with tab3:
+    up_s, down_s = calculate_capture_ratios(ret_sim, bench_ret)
+    c_data = [{"Label": t, "Up": s["UpCapture"], "Down": s["DownCapture"], "Type": "Asset"} for t, s in asset_stats.items()]
+    c_data.append({"Label": "SIMULATED", "Up": up_s, "Down": down_s, "Type": "Portfolio"})
+    fig3 = px.scatter(pd.DataFrame(c_data), x="Down", y="Up", text="Label", color="Type", title="Capture Ratios")
+    fig3.add_vline(x=100, line_dash="dash"); fig3.add_hline(y=100, line_dash="dash")
+    st.plotly_chart(fig3, use_container_width=True)
+
+with tab4:
+    fig4 = px.imshow(assets_ret.corr(), text_auto=".2f", color_continuous_scale="RdYlGn", title="Correlation Matrix")
+    st.plotly_chart(fig4, use_container_width=True)
+
+with tab5:
+    df_cum = pd.DataFrame({"Simulated": (1 + ret_sim).cumprod(), "Benchmark": (1 + bench_ret).cumprod()})
+    fig5 = px.line(df_cum, title="Cumulative Return")
+    st.plotly_chart(fig5, use_container_width=True)
+
+with tab6:
+    st.markdown("### Portfolio Optimization")
+    rf_daily = (1 + rf_input/100)**(1/252) - 1
+    df_opt = pd.concat([assets_ret, pd.Series(rf_daily, index=assets_ret.index, name="CASH")], axis=1)
+    opt_assets = df_opt.columns.tolist()
+    col_setup, col_res = st.columns([1, 2])
+    with col_setup:
+        target_obj = st.selectbox("Objective Function:", ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)"])
+        target_v = st.number_input("Target Downside Vol %", value=5.0) if "Target" in target_obj else None
+        bounds = [(0.0, 1.0) for _ in opt_assets]
+        if st.button("Run Solver", type="primary"):
+            res = run_solver(df_opt, rf_input, tuple(bounds), target_obj, mgmt_fee, target_v)
+            if res.success:
+                st.session_state['solver_res'] = {'weights': res.x, 'assets': opt_assets}
+    with col_res:
+        if 'solver_res' in st.session_state:
+            sw, sa = st.session_state['solver_res']['weights'], st.session_state['solver_res']['assets']
+            df_w = pd.DataFrame({"Asset": sa, "Weight": sw * 100}).query("Weight > 0.01")
+            st.plotly_chart(px.pie(df_w, values="Weight", names="Asset", title="Optimal Allocation"))
+            st.dataframe(df_w.sort_values("Weight", ascending=False))
 
 # ==============================================================================
-# 6. EXPORTAÇÃO (BARRA LATERAL)
+# 6. RELATÓRIO EXECUTIVO (SIDEBAR)
 # ==============================================================================
 st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Reporting")
-
-# Preparar dicionário de figuras para o relatório
-figs_report = {
-    "Performance Histórica": fig5,
-    "Análise de Risco x Retorno": fig1,
-    "Captura de Mercado": fig3,
-    "Matriz de Correlação": fig4,
-    "Qualidade da Volatilidade": fig2
-}
-
-if st.sidebar.button("Gerar Relatório Interativo (.html)", use_container_width=True):
-    html_report = generate_interactive_report(df_comp_fmt, figs_report, weights_orig, weights_sim)
-    
+st.sidebar.subheader("📄 Relatórios")
+if st.sidebar.button("Gerar Relatório Interativo (.html)", use_container_width=True, type="primary"):
+    figs_to_report = {
+        "Histórico de Retorno": fig5,
+        "Risk vs Return": fig1,
+        "Capture Ratios": fig3,
+        "Matriz de Correlação": fig4,
+        "Qualidade de Volatilidade": fig2
+    }
+    report_html = generate_interactive_report(df_comp_display, figs_to_report)
     st.sidebar.download_button(
         label="📥 Baixar Agora",
-        data=html_report,
-        file_name=f"Relatorio_Portfolio_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+        data=report_html,
+        file_name=f"Relatorio_{datetime.now().strftime('%Y%m%d')}.html",
         mime="text/html",
         use_container_width=True
     )
-    st.sidebar.success("Relatório preparado com sucesso!")
-
-# Solver Tab (Manteve Original)
-with tab6:
-    st.markdown("### Portfolio Optimization")
-    # ... código do solver original (não alterado) ...
-    # (Inserir aqui o bloco solver original se desejar manter a funcionalidade idêntica)
