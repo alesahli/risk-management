@@ -7,23 +7,25 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from scipy.optimize import minimize
 import io
-# ==============================================================================
-# 1. CONFIGURAÇÃO DA PÁGINA
-# ==============================================================================
+==============================================================================
+1. CONFIGURAÇÃO DA PÁGINA
+==============================================================================
 st.set_page_config(
 page_title="Portfolio Risk Management System",
 layout="wide",
 initial_sidebar_state="expanded"
 )
-# ==============================================================================
-# 2. FUNÇÕES CORE (BACKEND)
-# ==============================================================================
+==============================================================================
+2. FUNÇÕES CORE (BACKEND)
+==============================================================================
 @st.cache_data
 def get_market_data(tickers, start_date, end_date):
 if not tickers: return pd.DataFrame()
 try:
 s_date = pd.to_datetime(start_date) - timedelta(days=20)
 df = yf.download(tickers, start=s_date, end=end_date, progress=False, auto_adjust=True, threads=False)
+code
+Code
 if df.empty: return pd.DataFrame()
     
     data = pd.DataFrame()
@@ -50,7 +52,9 @@ except Exception as e:
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
 returns = returns.dropna()
 if returns.empty: return {}
-    rf_daily = (1 + rf_annual/100)**(1/252) - 1
+code
+Code
+rf_daily = (1 + rf_annual/100)**(1/252) - 1
 days = len(returns)
 
 total_return = (1 + returns).prod() - 1
@@ -109,6 +113,8 @@ fee_daily = (1 + fee_annual/100)(1/252) - 1
 tickers = asset_returns.columns.tolist()
 initial_weights = np.array([weights_dict.get(t, 0) for t in tickers]) / 100.0
 w_cash_initial = cash_pct / 100.0
+code
+Code
 if rebal_freq == 'Diário':
     gross_ret = asset_returns.fillna(0.0).dot(initial_weights) + (rf_daily * w_cash_initial)
     return gross_ret - fee_daily
@@ -153,6 +159,8 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
 rf_daily = (1 + rf_annual/100)(1/252) - 1
 fee_daily = (1 + mgmt_fee_annual/100)(1/252) - 1
 num_assets = len(df_returns.columns)
+code
+Code
 lower_bounds = np.array([b[0] for b in bounds])
 upper_bounds = np.array([b[1] for b in bounds])
 initial_guess = (lower_bounds + upper_bounds) / 2
@@ -213,7 +221,9 @@ except: pass
 else:
 try: df = pd.read_excel(uploaded_file)
 except ImportError: return None, "Servidor sem suporte a .xlsx. Por favor use o Template CSV."
-    if df.empty: return None, "Não foi possível ler o arquivo. Verifique se é um CSV válido."
+code
+Code
+if df.empty: return None, "Não foi possível ler o arquivo. Verifique se é um CSV válido."
 
     df.columns = [str(c).lower().strip() for c in df.columns]
     col_ticker = next((c for c in df.columns if c in ['ativo', 'ticker', 'asset', 'symbol', 'código']), None)
@@ -235,14 +245,16 @@ except ImportError: return None, "Servidor sem suporte a .xlsx. Por favor use o 
 
     return portfolio, None
 except Exception as e: return None, str(e)
-# ==============================================================================
-# 3. BARRA LATERAL (INPUTS)
-# ==============================================================================
+==============================================================================
+3. BARRA LATERAL (INPUTS)
+==============================================================================
 st.sidebar.header("Portfolio Configuration")
 with st.sidebar.expander("📂 Import / Export Portfolio", expanded=True):
 df_template = pd.DataFrame({"Ativo": ["PETR4.SA", "VALE3.SA"], "Peso": [50.0, 50.0]})
 csv_template = df_template.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
 st.download_button(label="Download Template (CSV)", data=csv_template, file_name="portfolio_template.csv", mime="text/csv", use_container_width=True)
+code
+Code
 uploaded_file = st.file_uploader("Upload Portfolio (CSV/XLSX)", type=['csv', 'xlsx'])
 if uploaded_file is not None:
     portfolio_dict, error_msg = load_portfolio_from_file(uploaded_file)
@@ -252,7 +264,7 @@ if uploaded_file is not None:
         st.success(f"Carregado: {len(portfolio_dict)} ativos.")
     else:
         st.error(f"Erro: {error_msg}")
-        default_tickers_text = "VALE3.SA, PETR4.SA, BPAC11.SA"
+default_tickers_text = "VALE3.SA, PETR4.SA, BPAC11.SA"
 if 'tickers_text_key' in st.session_state: default_tickers_text = st.session_state['tickers_text_key']
 tickers_text = st.sidebar.text_area("Asset Tickers:", value=default_tickers_text, height=100)
 tickers_input = [t.strip().upper() for t in tickers_text.split(',') if t.strip()]
@@ -282,6 +294,8 @@ total_orig, total_sim = 0, 0
 def_val_calc = 100.0 / len(tickers_input) if len(tickers_input) > 0 else 0
 c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
 c1.markdown("Ticker"); c2.markdown("Curr %"); c3.markdown("Sim %")
+code
+Code
 for t in tickers_input:
     c1, c2, c3 = st.sidebar.columns([2, 1.5, 1.5])
     c1.text(t)
@@ -302,9 +316,9 @@ if total_orig > 0:
     df_export = pd.DataFrame(list(weights_orig.items()), columns=["Ativo", "Peso"])
     csv_exp = df_export.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
     st.sidebar.download_button("Export Current Portfolio (CSV)", data=csv_exp, file_name="my_portfolio.csv", mime="text/csv")
-    # ==============================================================================
-# 4. PROCESSAMENTO E CÁLCULOS
-# ==============================================================================
+==============================================================================
+4. PROCESSAMENTO E CÁLCULOS
+==============================================================================
 all_tickers = list(set(tickers_input + [bench_ticker]))
 with st.spinner("Fetching market data..."):
 df_prices = get_market_data(all_tickers, start_date, end_date)
@@ -332,9 +346,9 @@ asset_stats[t] = {
 "UpsideDev": m.get("Upside-Desvio", 0.0),
 "Ret": m.get("Retorno Anualizado", 0.0)
 }
-# ==============================================================================
-# 5. DASHBOARD
-# ==============================================================================
+==============================================================================
+5. DASHBOARD
+==============================================================================
 st.title("Portfolio Risk Management System")
 --- BLOCO A: KPIs ---
 m_orig = calculate_metrics(ret_orig, rf_input, bench_ret)
@@ -345,6 +359,8 @@ with col_kpi:
 st.markdown(f"#### Performance Metrics (Simulated Rebal: {rebal_freq_sim})")
 metrics_order = ["Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio", "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"]
 keys_present = [k for k in metrics_order if k in m_orig]
+code
+Code
 df_comp = pd.DataFrame({
     "Metric": keys_present, 
     "Current (Fixed W)": [m_orig.get(k, 0) for k in keys_present], 
@@ -364,7 +380,7 @@ st.dataframe(
 )
 
 if rebal_freq_sim != "Diário": st.info(f"ℹ️ Drift active: '{rebal_freq_sim}' vs 'Fixed Weights'. Set Frequency to 'Diário' to match Solver/Fixed targets.")
-    with col_delta:
+with col_delta:
 st.markdown("##### Performance Delta")
 d_ret = m_sim.get("Retorno do Período", 0) - m_orig.get("Retorno do Período", 0)
 d_beta = m_sim.get("Beta", 0) - m_orig.get("Beta", 0)
@@ -376,7 +392,9 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
 scenario = st.radio("Select Scenario:", ["COVID-19 Crash (2020)", "Hawkish Cycle (2021-2022)"], horizontal=True)
 if scenario == "COVID-19 Crash (2020)": s_start, s_end, period_start, period_end = "2020-01-20", "2020-03-30", "2020-01-23", "2020-03-23"
 else: s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
-    try:
+code
+Code
+try:
     df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
     if not df_bench_stress.empty:
         if isinstance(df_bench_stress.columns, pd.MultiIndex):
@@ -435,7 +453,7 @@ if not df_bench_stress.empty:
         if used_proxy: st.caption(f"⚠️ Proxy used for: {', '.join(used_proxy)}")
     else: st.warning("Benchmark data empty for this range.")
 else: st.warning("Insufficient Benchmark data.")
-    --- BLOCO C: ABAS GRÁFICAS ---
+--- BLOCO C: ABAS GRÁFICAS ---
 st.markdown("---")
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Risk vs Return", "Volatility Quality", "Capture Ratios", "Correlation Matrix", "History", "Portfolio Solver"])
 with tab1:
@@ -453,6 +471,8 @@ st.plotly_chart(fig1, use_container_width=True)
 with tab2:
 st.markdown("##### Convexity Analysis")
 st.caption("Identify assets where volatility is favorable (High Upside/Downside Ratio).")
+code
+Code
 vol_data = []
 for t, s in asset_stats.items():
     vol = s['Vol']
@@ -507,7 +527,7 @@ if q_data:
     fig2.add_shape(type="line", x0=0, y0=0, x1=max_v, y1=max_v, line=dict(color="darkred", width=1, dash="dash"))
     fig2.update_layout(xaxis_title="Total Volatility", yaxis_title="Downside Deviation (Bad Vol)")
     st.plotly_chart(fig2, use_container_width=True)
-    with tab3:
+with tab3:
 up_o, down_o = calculate_capture_ratios(ret_orig, bench_ret)
 up_s, down_s = calculate_capture_ratios(ret_sim, bench_ret)
 c_data = [{"Label": t, "Up": s["UpCapture"], "Down": s["DownCapture"], "Type": "Asset"} for t, s in asset_stats.items()]
@@ -539,6 +559,8 @@ if st.button("Run Solver", type="primary"):
 bounds = [(r["Min %"]/100.0, r["Max %"]/100.0) for i, r in edited_df.iterrows()]
 with st.spinner("Optimizing..."): res = run_solver(df_opt, rf_input, tuple(bounds), target_obj, mgmt_fee, target_semidev_input)
 st.session_state['solver_result'] = {'success': res.success, 'message': res.message, 'weights': res.x, 'opt_assets': opt_assets}
+code
+Code
 with col_res:
     if 'solver_result' in st.session_state and st.session_state['solver_result']['success']:
         res_data, opt_weights, opt_assets_saved = st.session_state['solver_result'], st.session_state['solver_result']['weights'], st.session_state['solver_result']['opt_assets']
@@ -557,5 +579,3 @@ with col_res:
             st.session_state['rebal_freq_key'] = "Diário" 
         st.button("Apply to Simulation", on_click=update_weights_callback, help="Sets Rebalancing to 'Diário' to match solver.")
     elif 'solver_result' in st.session_state: st.error(f"Failed: {st.session_state['solver_result']['message']}")
-
-
