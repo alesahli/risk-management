@@ -37,7 +37,6 @@ def get_market_data(tickers, start_date, end_date):
         return pd.DataFrame()
     try:
         s_date = pd.to_datetime(start_date) - timedelta(days=20)
-
         df = yf.download(
             tickers,
             start=s_date,
@@ -46,21 +45,22 @@ def get_market_data(tickers, start_date, end_date):
             auto_adjust=True,
             threads=False
         )
-
         if df is None or df.empty:
             return pd.DataFrame()
 
         data = pd.DataFrame()
 
-        # yfinance pode retornar MultiIndex (OHLCV) ou colunas simples
         if isinstance(df.columns, pd.MultiIndex):
-            if 'Close' in df.columns.get_level_values(0):
+            lvl0 = df.columns.get_level_values(0)
+            lvl1 = df.columns.get_level_values(1)
+
+            if 'Close' in lvl0:
                 data = df.xs('Close', axis=1, level=0)
-            elif 'Close' in df.columns.get_level_values(1):
+            elif 'Close' in lvl1:
                 data = df.xs('Close', axis=1, level=1)
-            elif 'Adj Close' in df.columns.get_level_values(0):
+            elif 'Adj Close' in lvl0:
                 data = df.xs('Adj Close', axis=1, level=0)
-            elif 'Adj Close' in df.columns.get_level_values(1):
+            elif 'Adj Close' in lvl1:
                 data = df.xs('Adj Close', axis=1, level=1)
             else:
                 data = df.iloc[:, 0]
@@ -101,10 +101,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     days = len(returns)
 
     total_return = (1 + returns).prod() - 1
-    if days > 10:
-        ann_return = (1 + total_return) ** (252 / days) - 1
-    else:
-        ann_return = total_return
+    ann_return = (1 + total_return) ** (252 / days) - 1 if days > 10 else total_return
 
     ann_vol = returns.std() * np.sqrt(252)
 
@@ -134,17 +131,17 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
             beta = cov / var_bench if var_bench != 0 else 0.0
 
     return {
-        "Retorno do Período": total_return,
-        "Retorno Anualizado": ann_return,
-        "Volatilidade": ann_vol,
-        "Semi-Desvio": semi_dev,
-        "Upside-Desvio": upside_dev,
-        "Beta": beta,
-        "Sharpe": sharpe,
-        "Sortino": sortino,
-        "Max Drawdown": max_dd,
-        "VaR 95%": var_95,
-        "CVaR 95%": cvar_95
+        "Retorno do Período": float(total_return),
+        "Retorno Anualizado": float(ann_return),
+        "Volatilidade": float(ann_vol) if pd.notna(ann_vol) else 0.0,
+        "Semi-Desvio": float(semi_dev) if pd.notna(semi_dev) else 0.0,
+        "Upside-Desvio": float(upside_dev) if pd.notna(upside_dev) else 0.0,
+        "Beta": float(beta) if pd.notna(beta) else 0.0,
+        "Sharpe": float(sharpe) if pd.notna(sharpe) else 0.0,
+        "Sortino": float(sortino) if pd.notna(sortino) else 0.0,
+        "Max Drawdown": float(max_dd) if pd.notna(max_dd) else 0.0,
+        "VaR 95%": float(var_95) if pd.notna(var_95) else 0.0,
+        "CVaR 95%": float(cvar_95) if pd.notna(cvar_95) else 0.0
     }
 
 
@@ -162,7 +159,7 @@ def calculate_capture_ratios(asset_ret, bench_ret):
     down_mask = r_bench < 0
     down_cap = (r_asset[down_mask].mean() / r_bench[down_mask].mean()) if down_mask.sum() > 0 and r_bench[down_mask].mean() != 0 else 0.0
 
-    return up_cap * 100.0, down_cap * 100.0
+    return float(up_cap) * 100.0, float(down_cap) * 100.0
 
 
 def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annual, fee_annual, rebal_freq):
@@ -192,15 +189,10 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
                 resample_code = 'QE'
 
             temp_resample = asset_returns.resample(resample_code).last().index
-            if rebal_freq == 'Semestral':
-                rebal_dates = set(temp_resample[1::2])
-            else:
-                rebal_dates = set(temp_resample)
+            rebal_dates = set(temp_resample[1::2]) if rebal_freq == 'Semestral' else set(temp_resample)
+
         except Exception:
-            if rebal_freq == 'Mensal':
-                rebal_dates = set(asset_returns.resample('M').last().index)
-            else:
-                rebal_dates = set(asset_returns.resample('Q').last().index)
+            rebal_dates = set(asset_returns.resample('M').last().index) if rebal_freq == 'Mensal' else set(asset_returns.resample('Q').last().index)
 
     current_weights = initial_weights.copy()
     current_cash_w = w_cash_initial
@@ -238,10 +230,7 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
 
     initial_guess = (lower_bounds + upper_bounds) / 2.0
     sum_guess = np.sum(initial_guess)
-    if sum_guess > 0:
-        initial_guess = initial_guess / sum_guess
-    else:
-        initial_guess = np.array([1 / num_assets] * num_assets)
+    initial_guess = initial_guess / sum_guess if sum_guess > 0 else np.array([1 / num_assets] * num_assets)
 
     constraints = [{'type': 'eq', 'fun': lambda x: np.sum(x) - 1.0}]
 
@@ -300,7 +289,6 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     return result
 
 
-# --- FUNÇÃO DE IMPORTAÇÃO ---
 def load_portfolio_from_file(uploaded_file):
     try:
         df = pd.DataFrame()
@@ -364,12 +352,13 @@ def load_portfolio_from_file(uploaded_file):
         return None, str(e)
 
 # ==============================================================================
-# 2B. FUNÇÕES DE RELATÓRIO (PDF)  ✅ FIX CORES/BUGS
+# 2B. FUNÇÕES DE RELATÓRIO (PDF)  ✅ (FIX FINAL: compat Plotly + evita eixo em Table)
 # ==============================================================================
 def _force_print_theme(fig: go.Figure) -> go.Figure:
     """
-    Garante tema 'print-friendly' no EXPORT (PDF) sem mexer na UI do Streamlit.
-    Corrige bugs comuns do Kaleido (tabelas/pie saem escuros ou tudo preto).
+    Tema 'print-friendly' no EXPORT (PDF) sem mexer na UI do Streamlit.
+    Compatível com versões de Plotly onde 'titlefont' não existe.
+    Evita mexer em eixos quando o gráfico não tem eixos (ex.: go.Table / Pie).
     """
     f = copy.deepcopy(fig)
 
@@ -382,22 +371,29 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
         margin=dict(l=20, r=20, t=60, b=20)
     )
 
-    f.update_xaxes(
-        showgrid=True,
-        gridcolor="rgba(0,0,0,0.08)",
-        zerolinecolor="rgba(0,0,0,0.15)",
-        linecolor="rgba(0,0,0,0.25)",
-        tickfont=dict(color="black"),
-        titlefont=dict(color="black")
+    # Só ajusta eixos se houver traces cartesianos
+    has_cartesian = any(
+        getattr(tr, "type", "") in ("scatter", "bar", "histogram", "box", "violin", "heatmap", "candlestick", "ohlc")
+        for tr in f.data
     )
-    f.update_yaxes(
-        showgrid=True,
-        gridcolor="rgba(0,0,0,0.08)",
-        zerolinecolor="rgba(0,0,0,0.15)",
-        linecolor="rgba(0,0,0,0.25)",
-        tickfont=dict(color="black"),
-        titlefont=dict(color="black")
-    )
+
+    if has_cartesian:
+        f.update_xaxes(
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.08)",
+            zerolinecolor="rgba(0,0,0,0.15)",
+            linecolor="rgba(0,0,0,0.25)",
+            tickfont=dict(color="black"),
+            title_font=dict(color="black"),
+        )
+        f.update_yaxes(
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.08)",
+            zerolinecolor="rgba(0,0,0,0.15)",
+            linecolor="rgba(0,0,0,0.25)",
+            tickfont=dict(color="black"),
+            title_font=dict(color="black"),
+        )
 
     colorway = px.colors.qualitative.Plotly
 
@@ -413,7 +409,6 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
             if tr.marker is None:
                 tr.marker = {}
 
-            # força cores explícitas
             try:
                 has_colors = getattr(tr.marker, "colors", None) is not None
             except Exception:
@@ -444,8 +439,16 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
 
 
 def fig_to_png_bytes(fig, scale=2):
-    safe_fig = _force_print_theme(fig)
-    return pio.to_image(safe_fig, format="png", scale=scale)
+    """
+    Retorna bytes PNG ou None (sem quebrar o app).
+    """
+    try:
+        safe_fig = _force_print_theme(fig)
+        return pio.to_image(safe_fig, format="png", scale=scale)
+    except Exception as e:
+        # Não derruba o app no Streamlit Cloud
+        st.warning(f"Falha ao renderizar figura para PNG (kaleido/plotly): {e}")
+        return None
 
 
 def df_to_table_fig(df, title=None, max_rows=40):
@@ -488,7 +491,7 @@ def df_to_table_fig(df, title=None, max_rows=40):
 def write_pdf_report(output_path, report_title, subtitle, sections):
     """
     sections: lista de dicts:
-      {"title": "KPIs", "items": [{"type":"text","value":"..."}, {"type":"image","png_bytes":b"..."}]}
+      {"title": "...", "items": [{"type":"text","value":"..."}, {"type":"image","png_bytes":b"..."}]}
     """
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
@@ -528,6 +531,9 @@ def write_pdf_report(output_path, report_title, subtitle, sections):
 
     def draw_image(png_bytes, max_w_cm=17.6, max_h_cm=12.2):
         nonlocal y
+        if png_bytes is None:
+            return
+
         if y < 2.5 * cm:
             new_page()
 
@@ -562,10 +568,9 @@ def write_pdf_report(output_path, report_title, subtitle, sections):
             if it.get("type") == "text":
                 draw_text(it.get("value", ""))
             elif it.get("type") == "image":
-                draw_image(it.get("png_bytes", b""))
+                draw_image(it.get("png_bytes", None))
 
     c.save()
-
 
 # ==============================================================================
 # 3. BARRA LATERAL (INPUTS)
@@ -712,10 +717,7 @@ if df_prices.empty:
 
 df_ret = df_prices.ffill().pct_change().iloc[1:]
 
-if bench_ticker in df_ret.columns:
-    bench_ret = df_ret[bench_ticker].copy()
-else:
-    bench_ret = pd.Series(0.0, index=df_ret.index, name="BENCH")
+bench_ret = df_ret[bench_ticker].copy() if bench_ticker in df_ret.columns else pd.Series(0.0, index=df_ret.index, name="BENCH")
 
 valid_assets = [t for t in tickers_input if t in df_ret.columns]
 assets_ret = df_ret[valid_assets] if valid_assets else pd.DataFrame()
@@ -748,7 +750,6 @@ for t in valid_assets:
 # ==============================================================================
 st.title("Portfolio Risk Management System")
 
-# --- BLOCO A: KPIs ---
 m_orig = calculate_metrics(ret_orig, rf_input, bench_ret)
 m_sim = calculate_metrics(ret_sim, rf_input, bench_ret)
 m_bench = calculate_metrics(bench_ret, rf_input, bench_ret)
@@ -783,10 +784,7 @@ with col_kpi:
     )
 
     if rebal_freq_sim != "Diário":
-        st.info(
-            f"ℹ️ Drift active: '{rebal_freq_sim}' vs 'Fixed Weights'. "
-            f"Set Frequency to 'Diário' to match Solver/Fixed targets."
-        )
+        st.info(f"ℹ️ Drift active: '{rebal_freq_sim}' vs 'Fixed Weights'. Set Frequency to 'Diário' to match Solver/Fixed targets.")
 
 with col_delta:
     st.markdown("##### Performance Delta")
@@ -797,13 +795,13 @@ with col_delta:
     st.metric("Annualized Return", f"{m_sim.get('Retorno Anualizado', 0.0):.2%}")
     st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0.0):.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
-# --- BLOCO C: ABAS GRÁFICAS ---
+# --- ABAS ---
 st.markdown("---")
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["Risk vs Return", "Volatility Quality", "Capture Ratios", "Correlation Matrix", "History", "Portfolio Solver"]
 )
 
-# Guardamos figuras para o relatório completo
+# Guardar objetos para relatório
 FIG_RR_TOTAL = None
 FIG_RR_DOWNSIDE = None
 FIG_VOL_VISUAL = None
@@ -811,70 +809,29 @@ FIG_CAPTURE = None
 FIG_CORR = None
 FIG_HIST_CUM = None
 FIG_HIST_DD = None
-FIG_SOLVER_PIE = None
 DF_VOL_TABLE = None
 
-with tab1:
-    # UI mantém 1 gráfico conforme escolha
-    risk_mode = st.radio("Risk Metric (X-Axis):", ["Total Volatility", "Downside Deviation"], horizontal=True)
-    x_key = "Vol" if risk_mode == "Total Volatility" else "SemiDev"
-
-    scatter_data = []
+def _risk_return_fig(mode):
+    _x_key = "Vol" if mode == "Total Volatility" else "SemiDev"
+    _x_label = "Total Volatility" if mode == "Total Volatility" else "Downside Deviation"
+    _data = []
     for t, s in asset_stats.items():
-        scatter_data.append({"Label": t, "X": s.get(x_key, 0.0), "Y": s.get("Ret", 0.0), "Type": "Asset", "Size": 8})
+        _data.append({"Label": t, "X": s.get(_x_key, 0.0), "Y": s.get("Ret", 0.0), "Type": "Asset", "Size": 8})
+    _data.append({"Label": "CURRENT", "X": m_orig.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
+                  "Y": m_orig.get("Retorno Anualizado", 0.0), "Type": "Current Portfolio", "Size": 20})
+    _data.append({"Label": f"SIMULATED ({rebal_freq_sim})", "X": m_sim.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
+                  "Y": m_sim.get("Retorno Anualizado", 0.0), "Type": "Simulated Portfolio", "Size": 20})
+    _data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
+                  "Y": m_bench.get("Retorno Anualizado", 0.0), "Type": "Benchmark", "Size": 12})
+    _fig = px.scatter(pd.DataFrame(_data), x="X", y="Y", color="Type", size="Size", text="Label")
+    _fig.update_layout(xaxis_title=_x_label, yaxis_title="Annualized Return")
+    _fig.update_traces(textposition='top center')
+    return _fig
 
-    scatter_data.append({
-        "Label": "CURRENT",
-        "X": m_orig.get("Volatilidade" if x_key == "Vol" else "Semi-Desvio", 0.0),
-        "Y": m_orig.get("Retorno Anualizado", 0.0),
-        "Type": "Current Portfolio",
-        "Size": 20
-    })
-    scatter_data.append({
-        "Label": "SIMULATED",
-        "X": m_sim.get("Volatilidade" if x_key == "Vol" else "Semi-Desvio", 0.0),
-        "Y": m_sim.get("Retorno Anualizado", 0.0),
-        "Type": "Simulated Portfolio",
-        "Size": 20
-    })
-    scatter_data.append({
-        "Label": "BENCHMARK",
-        "X": m_bench.get("Volatilidade" if x_key == "Vol" else "Semi-Desvio", 0.0),
-        "Y": m_bench.get("Retorno Anualizado", 0.0),
-        "Type": "Benchmark",
-        "Size": 12
-    })
-
-    fig1 = px.scatter(
-        pd.DataFrame(scatter_data),
-        x="X",
-        y="Y",
-        color="Type",
-        size="Size",
-        text="Label",
-        color_discrete_map={"Asset": "#636EFA", "Current Portfolio": "#00CC96", "Simulated Portfolio": "#FFD700", "Benchmark": "#7F7F7F"}
-    )
-    fig1.update_layout(xaxis_title=risk_mode, yaxis_title="Annualized Return")
-    fig1.update_traces(textposition='top center')
+with tab1:
+    risk_mode = st.radio("Risk Metric (X-Axis):", ["Total Volatility", "Downside Deviation"], horizontal=True)
+    fig1 = _risk_return_fig(risk_mode)
     st.plotly_chart(fig1, use_container_width=True)
-
-    # Para relatório: gerar e guardar os DOIS (Total e Downside)
-    def _risk_return_fig(mode):
-        _x_key = "Vol" if mode == "Total Volatility" else "SemiDev"
-        _x_label = "Total Volatility" if mode == "Total Volatility" else "Downside Deviation"
-        _data = []
-        for t, s in asset_stats.items():
-            _data.append({"Label": t, "X": s.get(_x_key, 0.0), "Y": s.get("Ret", 0.0), "Type": "Asset", "Size": 8})
-        _data.append({"Label": "CURRENT", "X": m_orig.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
-                      "Y": m_orig.get("Retorno Anualizado", 0.0), "Type": "Current Portfolio", "Size": 20})
-        _data.append({"Label": f"SIMULATED ({rebal_freq_sim})", "X": m_sim.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
-                      "Y": m_sim.get("Retorno Anualizado", 0.0), "Type": "Simulated Portfolio", "Size": 20})
-        _data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
-                      "Y": m_bench.get("Retorno Anualizado", 0.0), "Type": "Benchmark", "Size": 12})
-        _fig = px.scatter(pd.DataFrame(_data), x="X", y="Y", color="Type", size="Size", text="Label")
-        _fig.update_layout(xaxis_title=_x_label, yaxis_title="Annualized Return")
-        _fig.update_traces(textposition='top center')
-        return _fig
 
     FIG_RR_TOTAL = _risk_return_fig("Total Volatility")
     FIG_RR_DOWNSIDE = _risk_return_fig("Downside Deviation")
@@ -931,7 +888,6 @@ with tab2:
     st.markdown("---")
     st.markdown("##### Visual Analysis")
     q_data = [{"Label": t, "Vol": s.get("Vol", 0.0), "SemiDev": s.get("SemiDev", 0.0)} for t, s in asset_stats.items()]
-    FIG_VOL_VISUAL = None
     if q_data:
         df_q = pd.DataFrame(q_data)
         max_v = df_q["Vol"].max() * 1.1 if not df_q.empty else 1.0
@@ -989,7 +945,7 @@ with tab5:
     dd_orig = (cum_orig - cum_orig.cummax()) / cum_orig.cummax()
     st.area_chart(dd_orig)
 
-    # Figuras específicas pro relatório
+    # Figuras para o PDF
     df_cum = pd.DataFrame({
         "Current (Fixed)": cum_orig,
         f"Simulated ({rebal_freq_sim})": cum_sim,
@@ -1019,31 +975,19 @@ with tab6:
     col_setup, col_res = st.columns([1, 2])
 
     with col_setup:
-        target_obj = st.selectbox(
-            "Objective Function:",
-            ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)"]
-        )
+        target_obj = st.selectbox("Objective Function:", ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)"])
 
         target_semidev_input = None
         if target_obj == "Max Return (Target Semi-Dev)":
-            target_semidev_input = st.number_input(
-                "Target Downside Volatility (%)",
-                value=5.0,
-                step=0.5,
-                min_value=0.1
-            )
-
-        default_min = [0.0] * len(opt_assets)
-        default_max = [100.0] * len(opt_assets)
+            target_semidev_input = st.number_input("Target Downside Volatility (%)", value=5.0, step=0.5, min_value=0.1)
 
         edited_df = st.data_editor(
-            pd.DataFrame({"Asset": opt_assets, "Min %": default_min, "Max %": default_max}),
+            pd.DataFrame({"Asset": opt_assets, "Min %": [0.0] * len(opt_assets), "Max %": [100.0] * len(opt_assets)}),
             hide_index=True
         )
 
         if st.button("Run Solver", type="primary"):
             bounds = [(float(r["Min %"]) / 100.0, float(r["Max %"]) / 100.0) for _, r in edited_df.iterrows()]
-
             with st.spinner("Optimizing..."):
                 res = run_solver(df_opt, rf_input, bounds, target_obj, mgmt_fee, target_semidev_input)
 
@@ -1063,7 +1007,6 @@ with tab6:
 
             fee_daily = (1 + mgmt_fee / 100.0) ** (1 / 252) - 1
             opt_ret_series = df_opt.fillna(0.0).dot(opt_weights) - fee_daily
-
             m_opt = calculate_metrics(opt_ret_series, rf_input, bench_ret)
 
             k1, k2, k3 = st.columns(3)
@@ -1075,9 +1018,7 @@ with tab6:
             c_chart, c_table = st.columns([1, 1])
 
             solver_pie_fig = px.pie(df_w, values="Weight", names="Asset", title="Allocation")
-            # ✅ Fix explícito para não sair "tudo preto" no PDF
             solver_pie_fig.update_traces(marker=dict(colors=px.colors.qualitative.Plotly))
-            FIG_SOLVER_PIE = solver_pie_fig
 
             with c_chart:
                 st.plotly_chart(solver_pie_fig, use_container_width=True)
@@ -1095,11 +1036,7 @@ with tab6:
                         st.session_state[f"sim_{asset_name}"] = round(st.session_state['solver_result']['weights'][i] * 100.0, 2)
                 st.session_state['rebal_freq_key'] = "Diário"
 
-            st.button(
-                "Apply to Simulation",
-                on_click=update_weights_callback,
-                help="Sets Rebalancing to 'Diário' to match solver."
-            )
+            st.button("Apply to Simulation", on_click=update_weights_callback, help="Sets Rebalancing to 'Diário' to match solver.")
 
         elif 'solver_result' in st.session_state:
             st.error(f"Failed: {st.session_state['solver_result']['message']}")
@@ -1132,31 +1069,27 @@ def build_solver_report_items():
     df_w = df_w[df_w["Weight %"] > 0.01].sort_values("Weight %", ascending=False)
 
     pie_fig = px.pie(df_w, values="Weight %", names="Asset", title="Optimized Allocation")
-    # ✅ Fix explícito de cores no pie (evita export preto)
     pie_fig.update_traces(marker=dict(colors=px.colors.qualitative.Plotly))
 
     table_fig = df_to_table_fig(df_w.reset_index(drop=True), title="Optimized Weights", max_rows=60)
 
-    items = [
+    return [
         {"type": "text", "value": f"Objective: {sr.get('target_obj', 'N/A')}"},
         {"type": "image", "png_bytes": fig_to_png_bytes(pie_fig)},
         {"type": "image", "png_bytes": fig_to_png_bytes(table_fig)},
     ]
-    return items
-
 
 if st.button("Generate Full PDF Report", type="primary"):
     with st.spinner("Building report... (requires kaleido + reportlab + Pillow)"):
-
-        # 1) Tabela principal (KPIs)
+        # Tabela principal (KPIs)
         kpi_table_fig = df_to_table_fig(df_comp, title="Performance Metrics (Main Table)", max_rows=60)
         kpi_png = fig_to_png_bytes(kpi_table_fig)
 
-        # 2) Risk/Return (2 gráficos)
+        # Risk/Return (2 gráficos)
         rr_total_png = fig_to_png_bytes(FIG_RR_TOTAL) if FIG_RR_TOTAL is not None else None
         rr_down_png = fig_to_png_bytes(FIG_RR_DOWNSIDE) if FIG_RR_DOWNSIDE is not None else None
 
-        # 3) Volatility Quality (tabela + visual)
+        # Volatility Quality
         vol_items = []
         if DF_VOL_TABLE is not None and isinstance(DF_VOL_TABLE, pd.DataFrame) and not DF_VOL_TABLE.empty:
             vol_table_fig = df_to_table_fig(DF_VOL_TABLE.reset_index(drop=True), title="Volatility Quality (Table)", max_rows=60)
@@ -1169,17 +1102,13 @@ if st.button("Generate Full PDF Report", type="primary"):
         else:
             vol_items.append({"type": "text", "value": "Volatility Quality: gráfico visual não disponível."})
 
-        # 4) Capture Ratios
+        # Capture / Corr / History
         capture_png = fig_to_png_bytes(FIG_CAPTURE) if FIG_CAPTURE is not None else None
-
-        # 5) Correlation Matrix
         corr_png = fig_to_png_bytes(FIG_CORR) if FIG_CORR is not None else None
-
-        # 6) History (cumulative + drawdown)
         hist_cum_png = fig_to_png_bytes(FIG_HIST_CUM) if FIG_HIST_CUM is not None else None
         hist_dd_png = fig_to_png_bytes(FIG_HIST_DD) if FIG_HIST_DD is not None else None
 
-        # 7) Solver
+        # Solver
         solver_items = build_solver_report_items()
 
         overview_text = (
@@ -1192,7 +1121,7 @@ if st.button("Generate Full PDF Report", type="primary"):
 
         sections = [
             {"title": "Overview", "items": [{"type": "text", "value": overview_text}]},
-            {"title": "Main Table (KPIs)", "items": [{"type": "image", "png_bytes": kpi_png}]},
+            {"title": "Main Table (KPIs)", "items": [{"type": "image", "png_bytes": kpi_png}] if kpi_png else [{"type": "text", "value": "KPIs: falha ao exportar imagem (kaleido/plotly)."}]},
             {"title": "Risk vs Return - Total Volatility", "items": [{"type": "image", "png_bytes": rr_total_png}] if rr_total_png else [{"type": "text", "value": "Risk/Return (Total): não disponível."}]},
             {"title": "Risk vs Return - Downside Deviation", "items": [{"type": "image", "png_bytes": rr_down_png}] if rr_down_png else [{"type": "text", "value": "Risk/Return (Downside): não disponível."}]},
             {"title": "Volatility Quality", "items": vol_items},
@@ -1231,4 +1160,4 @@ if st.button("Generate Full PDF Report", type="primary"):
         mime="application/pdf"
     )
 
-st.info("Dependências para exportar imagens do Plotly em PDF: instale `kaleido`, `reportlab` e `Pillow` no requirements.txt.")
+st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
