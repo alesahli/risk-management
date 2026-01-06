@@ -6,3 +6,6 @@ plotly
 scipy
 fpdf2
 kaleido==0.2.1
+kaleido
+reportlab
+Pillow
