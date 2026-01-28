@@ -37,7 +37,8 @@ def get_market_data(tickers, start_date, end_date):
     if not tickers:
         return pd.DataFrame()
     try:
-        s_date = pd.to_datetime(start_date) - timedelta(days=20)
+        # ALTERAÇÃO: Buffer aumentado para 30 dias para garantir cálculo de retorno inicial
+        s_date = pd.to_datetime(start_date) - timedelta(days=30)
         df = yf.download(
             tickers,
             start=s_date,
@@ -84,7 +85,8 @@ def get_market_data(tickers, start_date, end_date):
         except Exception:
             pass
 
-        data = data[data.index >= pd.to_datetime(start_date)]
+        # ALTERAÇÃO: Removido o filtro de data aqui. 
+        # Retornamos o buffer para calcular o pct_change corretamente depois.
         data = data.dropna(axis=1, how='all')
         return data
 
@@ -94,38 +96,59 @@ def get_market_data(tickers, start_date, end_date):
 
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
-    returns = returns.dropna()
-    if returns.empty:
+    # Remove NaNs para cálculos estatísticos, mas preserva info de datas se possível
+    clean_returns = returns.dropna()
+    if clean_returns.empty:
         return {}
 
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
-    days = len(returns)
+    
+    # ALTERAÇÃO: Cálculo de rentabilidade total geométrica
+    total_return = (1 + clean_returns).prod() - 1
 
-    total_return = (1 + returns).prod() - 1
-    ann_return = (1 + total_return) ** (252 / days) - 1 if days > 10 else total_return
+    # ALTERAÇÃO: Correção da Anualização (Time Delta vs Trading Days)
+    # Evita distorções quando o Yahoo perde dados ou tem muitos feriados
+    if len(clean_returns) > 1:
+        start_ts = clean_returns.index[0]
+        end_ts = clean_returns.index[-1]
+        days_diff = (end_ts - start_ts).days
+        
+        # Se o período for muito curto (< 7 dias), usa fallback de 252 dias úteis
+        if days_diff < 7:
+             years = len(clean_returns) / 252.0
+        else:
+             years = days_diff / 365.25
+    else:
+        years = 0 # Evita divisão por zero em array unitário
 
-    ann_vol = returns.std() * np.sqrt(252)
+    if years > 0:
+        ann_return = (1 + total_return) ** (1 / years) - 1
+    else:
+        ann_return = total_return # Para períodos muito curtos, assume o retorno simples
 
-    neg_ret = returns[returns < 0]
+    # Métricas de Volatilidade continuam baseadas em raiz de 252 (padrão de mercado)
+    ann_vol = clean_returns.std() * np.sqrt(252)
+
+    neg_ret = clean_returns[clean_returns < 0]
     semi_dev = neg_ret.std() * np.sqrt(252) if len(neg_ret) > 1 else 0.0
 
-    pos_ret = returns[returns > 0]
+    pos_ret = clean_returns[clean_returns > 0]
     upside_dev = pos_ret.std() * np.sqrt(252) if len(pos_ret) > 1 else 0.0
 
-    excess_ret = returns - rf_daily
-    sharpe = (excess_ret.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else 0.0
+    excess_ret = clean_returns - rf_daily
+    sharpe = (excess_ret.mean() / clean_returns.std()) * np.sqrt(252) if clean_returns.std() != 0 else 0.0
     sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252) if (not neg_ret.empty and neg_ret.std() != 0) else 0.0
 
-    cum = (1 + returns).cumprod()
+    cum = (1 + clean_returns).cumprod()
     dd = (cum - cum.cummax()) / cum.cummax()
     max_dd = dd.min() if not dd.empty else 0.0
 
-    var_95 = np.percentile(returns, 5) if len(returns) > 0 else 0.0
-    cvar_95 = returns[returns <= var_95].mean() if len(returns) > 0 else 0.0
+    var_95 = np.percentile(clean_returns, 5) if len(clean_returns) > 0 else 0.0
+    cvar_95 = clean_returns[clean_returns <= var_95].mean() if len(clean_returns) > 0 else 0.0
 
     beta = 0.0
     if benchmark_returns is not None:
-        aligned = pd.concat([returns, benchmark_returns], axis=1, join='inner').dropna()
+        aligned = pd.concat([clean_returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
             var_bench = np.var(aligned.iloc[:, 1])
@@ -373,7 +396,6 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
     )
 
     if has_cartesian:
-        # ✅ compatível com versões de plotly: usar title_font (não titlefont)
         f.update_xaxes(
             showgrid=True,
             gridcolor="rgba(0,0,0,0.08)",
@@ -709,13 +731,25 @@ else:
 all_tickers = list(set(tickers_input + [bench_ticker]))
 
 with st.spinner("Fetching market data..."):
-    df_prices = get_market_data(all_tickers, start_date, end_date)
+    # ALTERAÇÃO: Trazemos dados com buffer (agora get_market_data já tem o buffer embutido)
+    df_prices_buffer = get_market_data(all_tickers, start_date, end_date)
 
-if df_prices.empty:
+if df_prices_buffer.empty:
     st.error("No data found.")
     st.stop()
 
-df_ret = df_prices.ffill().pct_change().iloc[1:]
+# ALTERAÇÃO: Cálculo dos retornos no dataset expandido (buffer + período real)
+# Isso garante que a primeira data do seu range tenha o retorno calculado corretamente
+df_ret_buffer = df_prices_buffer.ffill().pct_change()
+
+# ALTERAÇÃO: Agora fazemos o corte (slicing) para o período desejado
+mask_date = df_ret_buffer.index >= pd.to_datetime(start_date)
+df_ret = df_ret_buffer.loc[mask_date]
+
+# Se o filtro resultar em vazio, avisa
+if df_ret.empty:
+    st.error("Data range empty after filtering. Check start date vs available data.")
+    st.stop()
 
 bench_ret = df_ret[bench_ticker].copy() if bench_ticker in df_ret.columns else pd.Series(0.0, index=df_ret.index, name="BENCH")
 
@@ -810,7 +844,7 @@ with col_delta:
     st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0.0):.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
 # ==============================================================================
-# --- BLOCO B: STRESS TEST --- ✅ (REINSERIDO)
+# --- BLOCO B: STRESS TEST ---
 # ==============================================================================
 STRESS_SCENARIO_NAME = None
 STRESS_BENCH_RES = None
@@ -924,7 +958,6 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
             if used_proxy:
                 st.caption(f"⚠️ Proxy used for: {', '.join(used_proxy)}")
 
-            # figura pro PDF (resumo)
             df_st = pd.DataFrame({
                 "Item": ["Benchmark", "Current", "Simulated"],
                 "Return": [bench_res, s_orig, s_sim]
@@ -1206,7 +1239,7 @@ with tab6:
             st.error(f"Failed: {st.session_state['solver_result']['message']}")
 
 # ==============================================================================
-# 6. EXPORT RELATÓRIO (PDF) - COMPLETO ✅ (inclui Stress Test)
+# 6. EXPORT RELATÓRIO (PDF)
 # ==============================================================================
 st.markdown("---")
 st.subheader("📄 Export Report (PDF)")
