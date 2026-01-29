@@ -30,26 +30,25 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 2. FUNÇÕES CORE (BACKEND) - CORRIGIDAS
+# 2. FUNÇÕES CORE (BACKEND)
 # ==============================================================================
 @st.cache_data(show_spinner=False)
 def get_market_data(tickers, start_date, end_date):
-    """
-    CORREÇÃO PRINCIPAL: 
-    - Removido auto_adjust=True para evitar distorções de preço
-    - Removido offset de 20 dias para garantir data exata
-    - Usa Adj Close diretamente para considerar dividendos corretamente
-    """
     if not tickers:
         return pd.DataFrame()
     try:
-        # CORREÇÃO 1: Sem offset de dias
+        # Buffer de 30 dias para garantir dados prévios para o cálculo de retorno
+        s_date = pd.to_datetime(start_date) - timedelta(days=30)
+        
+        # ALTERAÇÃO CRÍTICA: auto_adjust=False
+        # Isso garante que pegaremos o preço "Close" (Cotação de tela) e não o "Adj Close" (Retorno Total).
+        # Assim, o retorno baterá com o gráfico simples do Yahoo e sua conta manual (19%).
         df = yf.download(
             tickers,
-            start=start_date,  # ❌ ANTES: start=s_date (com -20 dias)
+            start=s_date,
             end=end_date,
             progress=False,
-            auto_adjust=False,  # ❌ ANTES: auto_adjust=True
+            auto_adjust=False, 
             threads=False
         )
         
@@ -58,29 +57,27 @@ def get_market_data(tickers, start_date, end_date):
 
         data = pd.DataFrame()
 
-        # CORREÇÃO 2: Priorizar Adj Close para capturar dividendos corretamente
+        # Prioriza 'Close' (Preço de Tela) para bater com sua conferência visual
+        # Se quiser Retorno Total (com dividendos), mudaria para 'Adj Close'
+        target_col = 'Close' 
+
         if isinstance(df.columns, pd.MultiIndex):
             lvl0 = df.columns.get_level_values(0)
             lvl1 = df.columns.get_level_values(1)
 
-            # Prioriza Adj Close sobre Close
-            if 'Adj Close' in lvl0:
+            if target_col in lvl0:
+                data = df.xs(target_col, axis=1, level=0)
+            elif target_col in lvl1:
+                data = df.xs(target_col, axis=1, level=1)
+            elif 'Adj Close' in lvl0: # Fallback
                 data = df.xs('Adj Close', axis=1, level=0)
-            elif 'Adj Close' in lvl1:
-                data = df.xs('Adj Close', axis=1, level=1)
-            elif 'Close' in lvl0:
-                data = df.xs('Close', axis=1, level=0)
-            elif 'Close' in lvl1:
-                data = df.xs('Close', axis=1, level=1)
             else:
                 data = df.iloc[:, 0]
         else:
-            # Prioriza Adj Close
-            if 'Adj Close' in df.columns:
+            if target_col in df.columns:
+                data = df[[target_col]]
+            elif 'Adj Close' in df.columns:
                 data = df[['Adj Close']]
-                data.columns = ['Close']  # Renomeia para padronizar
-            elif 'Close' in df.columns:
-                data = df[['Close']]
             else:
                 data = df.iloc[:, [0]]
 
@@ -95,10 +92,7 @@ def get_market_data(tickers, start_date, end_date):
         except Exception:
             pass
 
-        # CORREÇÃO 3: Garantir que começa exatamente na data solicitada
-        data = data[data.index >= pd.to_datetime(start_date)]
         data = data.dropna(axis=1, how='all')
-        
         return data
 
     except Exception as e:
@@ -107,47 +101,55 @@ def get_market_data(tickers, start_date, end_date):
 
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
-    """
-    CORREÇÃO: Cálculo de rentabilidade agora está correto
-    - total_return é o retorno composto total do período
-    - ann_return só anualiza se período > 10 dias
-    """
-    returns = returns.dropna()
-    if returns.empty:
+    clean_returns = returns.dropna()
+    if clean_returns.empty:
         return {}
 
+    # Cálculo Geométrico do Retorno Total do Período
+    total_return = (1 + clean_returns).prod() - 1
+
+    # ALTERAÇÃO: Cálculo de Anualização por Dias Corridos (Calendar Days)
+    # Corrige a distorção quando há poucos dias úteis no data feed
+    if len(clean_returns) > 1:
+        start_ts = clean_returns.index[0]
+        end_ts = clean_returns.index[-1]
+        days_diff = (end_ts - start_ts).days
+        
+        if days_diff < 7:
+             years = len(clean_returns) / 252.0
+        else:
+             years = days_diff / 365.25
+    else:
+        years = 0
+
+    if years > 0:
+        ann_return = (1 + total_return) ** (1 / years) - 1
+    else:
+        ann_return = total_return
+
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
-    days = len(returns)
+    ann_vol = clean_returns.std() * np.sqrt(252)
 
-    # Retorno total do período (composto)
-    total_return = (1 + returns).prod() - 1
-    
-    # CORREÇÃO: Anualização apenas se período for diferente de 1 ano
-    # Se days ~= 252 (1 ano), ann_return ≈ total_return
-    ann_return = (1 + total_return) ** (252 / days) - 1 if days > 10 else total_return
-
-    ann_vol = returns.std() * np.sqrt(252)
-
-    neg_ret = returns[returns < 0]
+    neg_ret = clean_returns[clean_returns < 0]
     semi_dev = neg_ret.std() * np.sqrt(252) if len(neg_ret) > 1 else 0.0
 
-    pos_ret = returns[returns > 0]
+    pos_ret = clean_returns[clean_returns > 0]
     upside_dev = pos_ret.std() * np.sqrt(252) if len(pos_ret) > 1 else 0.0
 
-    excess_ret = returns - rf_daily
-    sharpe = (excess_ret.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else 0.0
+    excess_ret = clean_returns - rf_daily
+    sharpe = (excess_ret.mean() / clean_returns.std()) * np.sqrt(252) if clean_returns.std() != 0 else 0.0
     sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252) if (not neg_ret.empty and neg_ret.std() != 0) else 0.0
 
-    cum = (1 + returns).cumprod()
+    cum = (1 + clean_returns).cumprod()
     dd = (cum - cum.cummax()) / cum.cummax()
     max_dd = dd.min() if not dd.empty else 0.0
 
-    var_95 = np.percentile(returns, 5) if len(returns) > 0 else 0.0
-    cvar_95 = returns[returns <= var_95].mean() if len(returns) > 0 else 0.0
+    var_95 = np.percentile(clean_returns, 5) if len(clean_returns) > 0 else 0.0
+    cvar_95 = clean_returns[clean_returns <= var_95].mean() if len(clean_returns) > 0 else 0.0
 
     beta = 0.0
     if benchmark_returns is not None:
-        aligned = pd.concat([returns, benchmark_returns], axis=1, join='inner').dropna()
+        aligned = pd.concat([clean_returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
             var_bench = np.var(aligned.iloc[:, 1])
@@ -407,7 +409,7 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
             showgrid=True,
             gridcolor="rgba(0,0,0,0.08)",
             zerolinecolor="rgba(0,0,0,0.15)",
-            linecolor="rgba(0,0,0,0.25"),
+            linecolor="rgba(0,0,0,0.25)",
             tickfont=dict(color="black"),
             title_font=dict(color="black"),
         )
@@ -730,13 +732,26 @@ else:
 all_tickers = list(set(tickers_input + [bench_ticker]))
 
 with st.spinner("Fetching market data..."):
-    df_prices = get_market_data(all_tickers, start_date, end_date)
+    # df_prices_buffer já vem com 'auto_adjust=False' e 'Close'
+    df_prices_buffer = get_market_data(all_tickers, start_date, end_date)
 
-if df_prices.empty:
+if df_prices_buffer.empty:
     st.error("No data found.")
     st.stop()
 
-df_ret = df_prices.ffill().pct_change().iloc[1:]
+# 1. Calcula retornos sobre tudo (buffer + periodo)
+df_ret_buffer = df_prices_buffer.ffill().pct_change()
+
+# 2. FILTRO DE DATA RIGOROSO
+# Usamos '>' (maior que) start_date, ao invés de '>='.
+# Isso garante que se start_date=28/01, começamos a contar a partir da variação DO dia 29
+# (Close 29 vs Close 28). Assim, a base de preço é exatamente o fechamento de 28/01.
+mask_date = df_ret_buffer.index > pd.to_datetime(start_date)
+df_ret = df_ret_buffer.loc[mask_date]
+
+if df_ret.empty:
+    st.error("Data range empty after filtering. Check start date vs available data.")
+    st.stop()
 
 bench_ret = df_ret[bench_ticker].copy() if bench_ticker in df_ret.columns else pd.Series(0.0, index=df_ret.index, name="BENCH")
 
@@ -770,7 +785,6 @@ for t in valid_assets:
 # 5. DASHBOARD
 # ==============================================================================
 st.title("Portfolio Risk Management System")
-st.info("✅ **VERSÃO CORRIGIDA**: Rentabilidades agora calculadas corretamente usando Adj Close e sem offset de datas.")
 
 m_orig = calculate_metrics(ret_orig, rf_input, bench_ret)
 m_sim = calculate_metrics(ret_sim, rf_input, bench_ret)
@@ -831,8 +845,520 @@ with col_delta:
     st.metric("Annualized Return", f"{m_sim.get('Retorno Anualizado', 0.0):.2%}")
     st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0.0):.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
-# [O resto do código continua igual - Stress Test, Tabs, PDF Export, etc.]
-# Por brevidade, não reproduzi tudo aqui, mas o código completo está funcional
+# ==============================================================================
+# --- BLOCO B: STRESS TEST ---
+# ==============================================================================
+STRESS_SCENARIO_NAME = None
+STRESS_BENCH_RES = None
+STRESS_CURR_RES = None
+STRESS_SIM_RES = None
+STRESS_USED_PROXY = []
+STRESS_SUMMARY_FIG = None
 
+with st.expander("Stress Test Scenarios (Historical)", expanded=False):
+    scenario = st.radio("Select Scenario:", ["COVID-19 Crash (2020)", "Hawkish Cycle (2021-2022)"], horizontal=True)
+    STRESS_SCENARIO_NAME = scenario
+
+    if scenario == "COVID-19 Crash (2020)":
+        s_start, s_end, period_start, period_end = "2020-01-20", "2020-03-30", "2020-01-23", "2020-03-23"
+    else:
+        s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
+
+    try:
+        # Stress Test também usa auto_adjust=False para manter coerência
+        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
+        if not df_bench_stress.empty:
+            if isinstance(df_bench_stress.columns, pd.MultiIndex):
+                if 'Close' in df_bench_stress.columns:
+                    df_bench_stress = df_bench_stress['Close']
+                elif 'Close' in df_bench_stress.columns.get_level_values(0):
+                    df_bench_stress = df_bench_stress.xs('Close', axis=1, level=0)
+                else:
+                    df_bench_stress = df_bench_stress.iloc[:, 0]
+            elif 'Close' in df_bench_stress.columns:
+                df_bench_stress = df_bench_stress['Close']
+            else:
+                df_bench_stress = df_bench_stress.iloc[:, 0]
+
+            if isinstance(df_bench_stress, pd.DataFrame):
+                df_bench_stress = df_bench_stress.iloc[:, 0]
+
+            try:
+                df_bench_stress.index = df_bench_stress.index.tz_localize(None)
+            except Exception:
+                pass
+    except Exception:
+        df_bench_stress = pd.Series(dtype=float)
+
+    df_assets_stress = pd.DataFrame()
+    if tickers_input:
+        try:
+            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
+            if not raw_assets.empty:
+                if isinstance(raw_assets.columns, pd.MultiIndex):
+                    if 'Close' in raw_assets.columns:
+                        df_assets_stress = raw_assets['Close']
+                    elif 'Close' in raw_assets.columns.get_level_values(0):
+                        df_assets_stress = raw_assets.xs('Close', axis=1, level=0)
+                    elif 'Close' in raw_assets.columns.get_level_values(1):
+                        df_assets_stress = raw_assets.xs('Close', axis=1, level=1)
+                    else:
+                        df_assets_stress = raw_assets.iloc[:, 0]
+                elif 'Close' in raw_assets.columns:
+                    df_assets_stress = raw_assets[['Close']]
+                    if len(tickers_input) == 1:
+                        df_assets_stress.columns = tickers_input
+                else:
+                    df_assets_stress = raw_assets
+
+                if isinstance(df_assets_stress, pd.Series):
+                    df_assets_stress = df_assets_stress.to_frame(name=tickers_input[0])
+
+                try:
+                    df_assets_stress.index = df_assets_stress.index.tz_localize(None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if isinstance(df_bench_stress, pd.Series) and not df_bench_stress.empty:
+        mask_b = (df_bench_stress.index >= pd.to_datetime(period_start)) & (df_bench_stress.index <= pd.to_datetime(period_end))
+        bench_cut = df_bench_stress.loc[mask_b]
+        if not bench_cut.empty:
+            bench_res = (bench_cut.iloc[-1] / bench_cut.iloc[0]) - 1
+            days_stress = (pd.to_datetime(period_end) - pd.to_datetime(period_start)).days
+            fee_factor_stress = (1 + mgmt_fee / 100.0) ** (days_stress / 365.0) - 1
+
+            perfs, used_proxy = {}, []
+            for t in tickers_input:
+                asset_return, has_data = 0.0, False
+                if isinstance(df_assets_stress, pd.DataFrame) and (t in df_assets_stress.columns):
+                    mask_a = (df_assets_stress.index >= pd.to_datetime(period_start)) & (df_assets_stress.index <= pd.to_datetime(period_end))
+                    s_asset = df_assets_stress.loc[mask_a, t].dropna()
+                    if not s_asset.empty:
+                        asset_return, has_data = (s_asset.iloc[-1] / s_asset.iloc[0]) - 1, True
+
+                if not has_data:
+                    beta_proxy = asset_stats.get(t, {}).get("Beta", 1.0)
+                    asset_return = beta_proxy * bench_res
+                    used_proxy.append(t)
+
+                perfs[t] = asset_return
+
+            s_orig = sum([(weights_orig.get(t, 0.0) / 100.0) * perfs[t] for t in tickers_input]) - fee_factor_stress
+            s_sim = sum([(weights_sim.get(t, 0.0) / 100.0) * perfs[t] for t in tickers_input]) - fee_factor_stress
+
+            STRESS_BENCH_RES = float(bench_res)
+            STRESS_CURR_RES = float(s_orig)
+            STRESS_SIM_RES = float(s_sim)
+            STRESS_USED_PROXY = used_proxy
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"Benchmark ({scenario.split()[0]})", f"{bench_res:.2%}", delta="Market Move", delta_color="inverse")
+            c2.metric("Current Portfolio", f"{s_orig:.2%}", delta=f"{(s_orig - bench_res):.2%} vs Bench")
+            c3.metric("Simulated Portfolio", f"{s_sim:.2%}", delta=f"{(s_sim - s_orig):.2%} vs Current")
+
+            if used_proxy:
+                st.caption(f"⚠️ Proxy used for: {', '.join(used_proxy)}")
+
+            df_st = pd.DataFrame({
+                "Item": ["Benchmark", "Current", "Simulated"],
+                "Return": [bench_res, s_orig, s_sim]
+            })
+            STRESS_SUMMARY_FIG = px.bar(df_st, x="Item", y="Return", title=f"Stress Test Summary - {scenario}")
+            STRESS_SUMMARY_FIG.update_layout(yaxis_tickformat=".2%")
+
+        else:
+            st.warning("Benchmark data empty for this range.")
+    else:
+        st.warning("Insufficient Benchmark data.")
+
+# ==============================================================================
+# --- BLOCO C: ABAS ---
+# ==============================================================================
 st.markdown("---")
-st.success("✅ Código corrigido! Teste com JURO11 para verificar se os cálculos estão corretos agora.")
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["Risk vs Return", "Volatility Quality", "Capture Ratios", "Correlation Matrix", "History", "Portfolio Solver"]
+)
+
+# Guardar objetos para relatório
+FIG_RR_TOTAL = None
+FIG_RR_DOWNSIDE = None
+FIG_VOL_VISUAL = None
+FIG_CAPTURE = None
+FIG_CORR = None
+FIG_HIST_CUM = None
+FIG_HIST_DD = None
+DF_VOL_TABLE = None
+SOLVER_PIE_FIG = None
+SOLVER_TABLE_FIG = None
+SOLVER_OBJECTIVE = None
+
+def _risk_return_fig(mode):
+    _x_key = "Vol" if mode == "Total Volatility" else "SemiDev"
+    _x_label = "Total Volatility" if mode == "Total Volatility" else "Downside Deviation"
+    _data = []
+    for t, s in asset_stats.items():
+        _data.append({"Label": t, "X": s.get(_x_key, 0.0), "Y": s.get("Ret", 0.0), "Type": "Asset", "Size": 8})
+    _data.append({"Label": "CURRENT", "X": m_orig.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
+                  "Y": m_orig.get("Retorno Anualizado", 0.0), "Type": "Current Portfolio", "Size": 20})
+    _data.append({"Label": f"SIMULATED ({rebal_freq_sim})", "X": m_sim.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
+                  "Y": m_sim.get("Retorno Anualizado", 0.0), "Type": "Simulated Portfolio", "Size": 20})
+    _data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
+                  "Y": m_bench.get("Retorno Anualizado", 0.0), "Type": "Benchmark", "Size": 12})
+    _fig = px.scatter(pd.DataFrame(_data), x="X", y="Y", color="Type", size="Size", text="Label")
+    _fig.update_layout(xaxis_title=_x_label, yaxis_title="Annualized Return")
+    _fig.update_traces(textposition='top center')
+    return _fig
+
+with tab1:
+    risk_mode = st.radio("Risk Metric (X-Axis):", ["Total Volatility", "Downside Deviation"], horizontal=True)
+    fig1 = _risk_return_fig("Total Volatility" if risk_mode == "Total Volatility" else "Downside Deviation")
+    st.plotly_chart(fig1, use_container_width=True)
+
+    FIG_RR_TOTAL = _risk_return_fig("Total Volatility")
+    FIG_RR_DOWNSIDE = _risk_return_fig("Downside Deviation")
+
+with tab2:
+    st.markdown("##### Convexity Analysis")
+    st.caption("Identify assets where volatility is favorable (High Upside/Downside Ratio).")
+
+    vol_data = []
+    for t, s in asset_stats.items():
+        vol = float(s.get('Vol', 0.0))
+        down = float(s.get('SemiDev', 0.0))
+        up = float(s.get('UpsideDev', 0.0))
+
+        ratio_tot_down = vol / down if down != 0 else 0.0
+        ratio_up_down = up / down if down != 0 else 0.0
+
+        vol_data.append({
+            "Asset": t,
+            "Total Vol": vol,
+            "Downside Vol": down,
+            "Upside Vol": up,
+            "Total/Down Ratio": ratio_tot_down,
+            "Upside/Down Ratio": ratio_up_down
+        })
+
+    df_vol = pd.DataFrame(vol_data) if vol_data else pd.DataFrame()
+    if not df_vol.empty:
+        df_vol = df_vol.sort_values("Upside/Down Ratio", ascending=False)
+
+    DF_VOL_TABLE = df_vol.copy()
+
+    if not df_vol.empty:
+        def color_ratio(val):
+            try:
+                v = float(val)
+            except Exception:
+                return ""
+            if v > 1.1:
+                return 'background-color: #d8f5d8; color: black'
+            elif v < 0.9:
+                return 'background-color: #f5d8d8; color: black'
+            else:
+                return ''
+
+        st.dataframe(
+            df_vol.set_index("Asset").style
+            .format({
+                "Total Vol": "{:.2%}",
+                "Downside Vol": "{:.2%}",
+                "Upside Vol": "{:.2%}",
+                "Total/Down Ratio": "{:.2f}x",
+                "Upside/Down Ratio": "{:.2f}x"
+            })
+            .applymap(color_ratio, subset=["Upside/Down Ratio"]),
+            use_container_width=True
+        )
+
+    st.markdown("---")
+    st.markdown("##### Visual Analysis")
+    q_data = [{"Label": t, "Vol": s.get("Vol", 0.0), "SemiDev": s.get("SemiDev", 0.0)} for t, s in asset_stats.items()]
+    if q_data:
+        df_q = pd.DataFrame(q_data)
+        max_v = df_q["Vol"].max() * 1.1 if not df_q.empty else 1.0
+        fig2 = px.scatter(df_q, x="Vol", y="SemiDev", text="Label", height=500)
+        fig2.add_shape(type="line", x0=0, y0=0, x1=max_v, y1=max_v, line=dict(color="darkred", width=1, dash="dash"))
+        fig2.update_layout(xaxis_title="Total Volatility", yaxis_title="Downside Deviation (Bad Vol)")
+        st.plotly_chart(fig2, use_container_width=True)
+        FIG_VOL_VISUAL = fig2
+
+with tab3:
+    up_o, down_o = calculate_capture_ratios(ret_orig, bench_ret)
+    up_s, down_s = calculate_capture_ratios(ret_sim, bench_ret)
+
+    c_data = [{"Label": t, "Up": s.get("UpCapture", 0.0), "Down": s.get("DownCapture", 0.0), "Type": "Asset"} for t, s in asset_stats.items()]
+    c_data.append({"Label": "CURRENT", "Up": up_o, "Down": down_o, "Type": "Portfolio"})
+    c_data.append({"Label": "SIMULATED", "Up": up_s, "Down": down_s, "Type": "Portfolio"})
+
+    df_c = pd.DataFrame(c_data)
+    fig3 = px.scatter(
+        df_c,
+        x="Down",
+        y="Up",
+        text="Label",
+        color="Type",
+        color_discrete_map={"Asset": "#636EFA", "Portfolio": "#00CC96"}
+    )
+    fig3.add_vline(x=100, line_dash="dash", line_color="gray")
+    fig3.add_hline(y=100, line_dash="dash", line_color="gray")
+    st.plotly_chart(fig3, use_container_width=True)
+    FIG_CAPTURE = fig3
+
+with tab4:
+    corr_fig = px.imshow(
+        assets_ret.corr(),
+        text_auto=".2f",
+        aspect="auto",
+        color_continuous_scale="RdYlGn",
+        zmin=-1,
+        zmax=1
+    )
+    st.plotly_chart(corr_fig, use_container_width=True)
+    FIG_CORR = corr_fig
+
+with tab5:
+    cum_orig = (1 + ret_orig).cumprod()
+    cum_sim = (1 + ret_sim).cumprod()
+    cum_bench = (1 + bench_ret).cumprod()
+
+    st.line_chart(pd.DataFrame({
+        "Current (Fixed)": cum_orig,
+        f"Simulated ({rebal_freq_sim})": cum_sim,
+        "Benchmark": cum_bench
+    }))
+
+    dd_orig = (cum_orig - cum_orig.cummax()) / cum_orig.cummax()
+    st.area_chart(dd_orig)
+
+    df_cum = pd.DataFrame({
+        "Current (Fixed)": cum_orig,
+        f"Simulated ({rebal_freq_sim})": cum_sim,
+        "Benchmark": cum_bench
+    })
+
+    fig_cum = go.Figure()
+    for col in df_cum.columns:
+        fig_cum.add_trace(go.Scatter(x=df_cum.index, y=df_cum[col], mode="lines", name=col))
+    fig_cum.update_layout(title="Cumulative Performance", xaxis_title="Date", yaxis_title="Growth of $1")
+    FIG_HIST_CUM = fig_cum
+
+    fig_dd = go.Figure()
+    fig_dd.add_trace(go.Scatter(x=dd_orig.index, y=dd_orig.values, mode="lines", fill="tozeroy", name="Drawdown (Current)"))
+    fig_dd.update_layout(title="Drawdown (Current Portfolio)", xaxis_title="Date", yaxis_title="Drawdown")
+    FIG_HIST_DD = fig_dd
+
+with tab6:
+    st.markdown("### Portfolio Optimization")
+
+    rf_daily = (1 + rf_input / 100.0) ** (1 / 252) - 1
+    cash_series = pd.Series(rf_daily, index=assets_ret.index, name="CASH")
+
+    df_opt = pd.concat([assets_ret, cash_series], axis=1)
+    opt_assets = df_opt.columns.tolist()
+
+    col_setup, col_res = st.columns([1, 2])
+
+    with col_setup:
+        target_obj = st.selectbox("Objective Function:", ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)"])
+
+        target_semidev_input = None
+        if target_obj == "Max Return (Target Semi-Dev)":
+            target_semidev_input = st.number_input("Target Downside Volatility (%)", value=5.0, step=0.5, min_value=0.1)
+
+        edited_df = st.data_editor(
+            pd.DataFrame({"Asset": opt_assets, "Min %": [0.0] * len(opt_assets), "Max %": [100.0] * len(opt_assets)}),
+            hide_index=True
+        )
+
+        if st.button("Run Solver", type="primary"):
+            bounds = [(float(r["Min %"]) / 100.0, float(r["Max %"]) / 100.0) for _, r in edited_df.iterrows()]
+            with st.spinner("Optimizing..."):
+                res = run_solver(df_opt, rf_input, bounds, target_obj, mgmt_fee, target_semidev_input)
+
+            st.session_state['solver_result'] = {
+                'success': bool(res.success),
+                'message': str(res.message),
+                'weights': res.x,
+                'opt_assets': opt_assets,
+                'target_obj': target_obj
+            }
+
+    with col_res:
+        if 'solver_result' in st.session_state and st.session_state['solver_result']['success']:
+            sr = st.session_state['solver_result']
+            SOLVER_OBJECTIVE = sr.get("target_obj", None)
+
+            opt_weights = sr['weights']
+            opt_assets_saved = sr['opt_assets']
+
+            fee_daily = (1 + mgmt_fee / 100.0) ** (1 / 252) - 1
+            opt_ret_series = df_opt.fillna(0.0).dot(opt_weights) - fee_daily
+            m_opt = calculate_metrics(opt_ret_series, rf_input, bench_ret)
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Optimized Annual Return", f"{m_opt.get('Retorno Anualizado', 0.0):.2%}")
+            k2.metric("Sortino Ratio", f"{m_opt.get('Sortino', 0.0):.2f}")
+            k3.metric("Downside Vol", f"{m_opt.get('Semi-Desvio', 0.0):.2%}")
+
+            df_w = pd.DataFrame({"Asset": opt_assets_saved, "Weight %": opt_weights * 100.0}).query("`Weight %` > 0.01")
+            df_w = df_w.sort_values("Weight %", ascending=False)
+
+            c_chart, c_table = st.columns([1, 1])
+
+            solver_pie_fig = px.pie(df_w, values="Weight %", names="Asset", title="Allocation")
+            solver_pie_fig.update_traces(marker=dict(colors=px.colors.qualitative.Plotly))
+            SOLVER_PIE_FIG = solver_pie_fig
+
+            solver_table_fig = df_to_table_fig(
+                df_w.reset_index(drop=True),
+                title="Optimized Weights",
+                max_rows=60,
+                round_map={"Weight %": 2}
+            )
+            SOLVER_TABLE_FIG = solver_table_fig
+
+            with c_chart:
+                st.plotly_chart(solver_pie_fig, use_container_width=True)
+
+            with c_table:
+                st.dataframe(
+                    df_w.style.format({"Weight %": "{:.2f}%"}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            def update_weights_callback():
+                for i, asset_name in enumerate(st.session_state['solver_result']['opt_assets']):
+                    if asset_name != "CASH":
+                        st.session_state[f"sim_{asset_name}"] = round(st.session_state['solver_result']['weights'][i] * 100.0, 2)
+                st.session_state['rebal_freq_key'] = "Diário"
+
+            st.button("Apply to Simulation", on_click=update_weights_callback, help="Sets Rebalancing to 'Diário' to match solver.")
+
+        elif 'solver_result' in st.session_state:
+            st.error(f"Failed: {st.session_state['solver_result']['message']}")
+
+# ==============================================================================
+# 6. EXPORT RELATÓRIO (PDF)
+# ==============================================================================
+st.markdown("---")
+st.subheader("📄 Export Report (PDF)")
+
+st.caption(
+    "O relatório inclui: tabela principal, Stress Test, Risk/Return (Total Vol e Downside), Volatility Quality, "
+    "Capture Ratios, Correlation Matrix, History e Portfolio Solver."
+)
+
+if st.button("Generate Full PDF Report", type="primary"):
+    with st.spinner("Building report... (requires kaleido + reportlab + Pillow)"):
+        # Tabela principal
+        kpi_table_fig = df_to_table_fig(df_comp.reset_index(drop=True), title="Performance Metrics (Main Table)", max_rows=60)
+        kpi_png = fig_to_png_bytes(kpi_table_fig)
+
+        rr_total_png = fig_to_png_bytes(FIG_RR_TOTAL) if FIG_RR_TOTAL is not None else None
+        rr_down_png = fig_to_png_bytes(FIG_RR_DOWNSIDE) if FIG_RR_DOWNSIDE is not None else None
+
+        # Stress Test (fig + texto)
+        stress_items = []
+        if STRESS_SCENARIO_NAME is None:
+            stress_items.append({"type": "text", "value": "Stress Test: não executado."})
+        else:
+            stress_items.append({"type": "text", "value": f"Scenario: {STRESS_SCENARIO_NAME}"})
+            if STRESS_BENCH_RES is not None:
+                stress_items.append({"type": "text", "value": f"Benchmark: {STRESS_BENCH_RES:.2%} | Current: {STRESS_CURR_RES:.2%} | Simulated: {STRESS_SIM_RES:.2%}"})
+            if STRESS_USED_PROXY:
+                stress_items.append({"type": "text", "value": f"Proxy used for: {', '.join(STRESS_USED_PROXY)}"})
+            if STRESS_SUMMARY_FIG is not None:
+                stress_items.append({"type": "image", "png_bytes": fig_to_png_bytes(STRESS_SUMMARY_FIG)})
+
+        # Volatility Quality (ordem + arredondamento)
+        vol_items = []
+        if DF_VOL_TABLE is not None and isinstance(DF_VOL_TABLE, pd.DataFrame) and not DF_VOL_TABLE.empty:
+            vol_pdf = DF_VOL_TABLE.copy().sort_values("Upside/Down Ratio", ascending=False)
+            vol_table_fig = df_to_table_fig(
+                vol_pdf.reset_index(drop=True),
+                title="Volatility Quality (Table)",
+                max_rows=60,
+                round_map={
+                    "Total Vol": 4, "Downside Vol": 4, "Upside Vol": 4,
+                    "Total/Down Ratio": 2, "Upside/Down Ratio": 2
+                }
+            )
+            vol_items.append({"type": "image", "png_bytes": fig_to_png_bytes(vol_table_fig)})
+        else:
+            vol_items.append({"type": "text", "value": "Volatility Quality: tabela não disponível."})
+
+        if FIG_VOL_VISUAL is not None:
+            vol_items.append({"type": "image", "png_bytes": fig_to_png_bytes(FIG_VOL_VISUAL)})
+
+        capture_png = fig_to_png_bytes(FIG_CAPTURE) if FIG_CAPTURE is not None else None
+        corr_png = fig_to_png_bytes(FIG_CORR) if FIG_CORR is not None else None
+        hist_cum_png = fig_to_png_bytes(FIG_HIST_CUM) if FIG_HIST_CUM is not None else None
+        hist_dd_png = fig_to_png_bytes(FIG_HIST_DD) if FIG_HIST_DD is not None else None
+
+        # Solver
+        solver_items = []
+        if SOLVER_OBJECTIVE is not None:
+            solver_items.append({"type": "text", "value": f"Objective: {SOLVER_OBJECTIVE}"})
+        else:
+            solver_items.append({"type": "text", "value": "Solver: nenhum resultado encontrado (execute o solver para incluir nesta seção)."})
+
+        if SOLVER_PIE_FIG is not None:
+            solver_items.append({"type": "image", "png_bytes": fig_to_png_bytes(SOLVER_PIE_FIG)})
+        if SOLVER_TABLE_FIG is not None:
+            solver_items.append({"type": "image", "png_bytes": fig_to_png_bytes(SOLVER_TABLE_FIG)})
+
+        overview_text = (
+            f"Benchmark: {bench_ticker}\n"
+            f"Period: {pd.to_datetime(start_date).date()} to {pd.to_datetime(end_date).date()}\n"
+            f"Simulated Rebalance: {rebal_freq_sim}\n"
+            f"Risk Free (p.a.): {rf_input:.2f}% | Mgmt Fee (p.a.): {mgmt_fee:.2f}%\n"
+            f"Assets: {', '.join(valid_assets)}\n"
+        )
+
+        sections = [
+            {"title": "Overview", "items": [{"type": "text", "value": overview_text}]},
+            {"title": "Main Table (KPIs)", "items": [{"type": "image", "png_bytes": kpi_png}] if kpi_png else [{"type": "text", "value": "KPIs: falha ao exportar imagem (kaleido/plotly)."}]},
+            {"title": "Stress Test (Historical)", "items": stress_items},
+            {"title": "Risk vs Return - Total Volatility", "items": [{"type": "image", "png_bytes": rr_total_png}] if rr_total_png else [{"type": "text", "value": "Risk/Return (Total): não disponível."}]},
+            {"title": "Risk vs Return - Downside Deviation", "items": [{"type": "image", "png_bytes": rr_down_png}] if rr_down_png else [{"type": "text", "value": "Risk/Return (Downside): não disponível."}]},
+            {"title": "Volatility Quality", "items": vol_items},
+            {"title": "Capture Ratios", "items": [{"type": "image", "png_bytes": capture_png}] if capture_png else [{"type": "text", "value": "Capture Ratios: não disponível."}]},
+            {"title": "Correlation Matrix", "items": [{"type": "image", "png_bytes": corr_png}] if corr_png else [{"type": "text", "value": "Correlation Matrix: não disponível."}]},
+            {"title": "History", "items": (
+                ([{"type": "image", "png_bytes": hist_cum_png}] if hist_cum_png else [{"type": "text", "value": "History (Cumulative): não disponível."}]) +
+                ([{"type": "image", "png_bytes": hist_dd_png}] if hist_dd_png else [{"type": "text", "value": "History (Drawdown): não disponível."}])
+            )},
+            {"title": "Portfolio Solver", "items": solver_items},
+        ]
+
+        tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp_pdf.close()
+
+        write_pdf_report(
+            output_path=tmp_pdf.name,
+            report_title="Portfolio Risk Management Report",
+            subtitle=f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            sections=sections
+        )
+
+        with open(tmp_pdf.name, "rb") as f:
+            pdf_bytes = f.read()
+
+        try:
+            os.remove(tmp_pdf.name)
+        except Exception:
+            pass
+
+    st.success("Report ready!")
+    st.download_button(
+        "Download PDF",
+        data=pdf_bytes,
+        file_name="portfolio_risk_report_full.pdf",
+        mime="application/pdf"
+    )
+
+st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
