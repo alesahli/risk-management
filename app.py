@@ -30,26 +30,25 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 2. FUNÇÕES CORE (BACKEND) - CORRIGIDAS
+# 2. FUNÇÕES CORE (BACKEND)
 # ==============================================================================
 @st.cache_data(show_spinner=False)
 def get_market_data(tickers, start_date, end_date):
-    """
-    CORREÇÃO PRINCIPAL: 
-    - Removido auto_adjust=True para evitar distorções de preço
-    - Removido offset de 20 dias para garantir data exata
-    - Usa Adj Close diretamente para considerar dividendos corretamente
-    """
     if not tickers:
         return pd.DataFrame()
     try:
-        # CORREÇÃO 1: Sem offset de dias
+        # Buffer de 30 dias para garantir dados prévios para o cálculo de retorno
+        s_date = pd.to_datetime(start_date) - timedelta(days=30)
+        
+        # ALTERAÇÃO CRÍTICA: auto_adjust=False
+        # Isso garante que pegaremos o preço "Close" (Cotação de tela) e não o "Adj Close" (Retorno Total).
+        # Assim, o retorno baterá com o gráfico simples do Yahoo e sua conta manual (19%).
         df = yf.download(
             tickers,
-            start=start_date,
+            start=s_date,
             end=end_date,
             progress=False,
-            auto_adjust=False,
+            auto_adjust=False, 
             threads=False
         )
         
@@ -58,29 +57,27 @@ def get_market_data(tickers, start_date, end_date):
 
         data = pd.DataFrame()
 
-        # CORREÇÃO 2: Priorizar Adj Close para capturar dividendos corretamente
+        # Prioriza 'Close' (Preço de Tela) para bater com sua conferência visual
+        # Se quiser Retorno Total (com dividendos), mudaria para 'Adj Close'
+        target_col = 'Close' 
+
         if isinstance(df.columns, pd.MultiIndex):
             lvl0 = df.columns.get_level_values(0)
             lvl1 = df.columns.get_level_values(1)
 
-            # Prioriza Adj Close sobre Close
-            if 'Adj Close' in lvl0:
+            if target_col in lvl0:
+                data = df.xs(target_col, axis=1, level=0)
+            elif target_col in lvl1:
+                data = df.xs(target_col, axis=1, level=1)
+            elif 'Adj Close' in lvl0: # Fallback
                 data = df.xs('Adj Close', axis=1, level=0)
-            elif 'Adj Close' in lvl1:
-                data = df.xs('Adj Close', axis=1, level=1)
-            elif 'Close' in lvl0:
-                data = df.xs('Close', axis=1, level=0)
-            elif 'Close' in lvl1:
-                data = df.xs('Close', axis=1, level=1)
             else:
                 data = df.iloc[:, 0]
         else:
-            # Prioriza Adj Close
-            if 'Adj Close' in df.columns:
+            if target_col in df.columns:
+                data = df[[target_col]]
+            elif 'Adj Close' in df.columns:
                 data = df[['Adj Close']]
-                data.columns = ['Close']
-            elif 'Close' in df.columns:
-                data = df[['Close']]
             else:
                 data = df.iloc[:, [0]]
 
@@ -95,10 +92,7 @@ def get_market_data(tickers, start_date, end_date):
         except Exception:
             pass
 
-        # CORREÇÃO 3: Garantir que começa exatamente na data solicitada
-        data = data[data.index >= pd.to_datetime(start_date)]
         data = data.dropna(axis=1, how='all')
-        
         return data
 
     except Exception as e:
@@ -107,38 +101,55 @@ def get_market_data(tickers, start_date, end_date):
 
 
 def calculate_metrics(returns, rf_annual, benchmark_returns=None):
-    returns = returns.dropna()
-    if returns.empty:
+    clean_returns = returns.dropna()
+    if clean_returns.empty:
         return {}
 
+    # Cálculo Geométrico do Retorno Total do Período
+    total_return = (1 + clean_returns).prod() - 1
+
+    # ALTERAÇÃO: Cálculo de Anualização por Dias Corridos (Calendar Days)
+    # Corrige a distorção quando há poucos dias úteis no data feed
+    if len(clean_returns) > 1:
+        start_ts = clean_returns.index[0]
+        end_ts = clean_returns.index[-1]
+        days_diff = (end_ts - start_ts).days
+        
+        if days_diff < 7:
+             years = len(clean_returns) / 252.0
+        else:
+             years = days_diff / 365.25
+    else:
+        years = 0
+
+    if years > 0:
+        ann_return = (1 + total_return) ** (1 / years) - 1
+    else:
+        ann_return = total_return
+
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
-    days = len(returns)
+    ann_vol = clean_returns.std() * np.sqrt(252)
 
-    total_return = (1 + returns).prod() - 1
-    ann_return = (1 + total_return) ** (252 / days) - 1 if days > 10 else total_return
-
-    ann_vol = returns.std() * np.sqrt(252)
-
-    neg_ret = returns[returns < 0]
+    neg_ret = clean_returns[clean_returns < 0]
     semi_dev = neg_ret.std() * np.sqrt(252) if len(neg_ret) > 1 else 0.0
 
-    pos_ret = returns[returns > 0]
+    pos_ret = clean_returns[clean_returns > 0]
     upside_dev = pos_ret.std() * np.sqrt(252) if len(pos_ret) > 1 else 0.0
 
-    excess_ret = returns - rf_daily
-    sharpe = (excess_ret.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else 0.0
+    excess_ret = clean_returns - rf_daily
+    sharpe = (excess_ret.mean() / clean_returns.std()) * np.sqrt(252) if clean_returns.std() != 0 else 0.0
     sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252) if (not neg_ret.empty and neg_ret.std() != 0) else 0.0
 
-    cum = (1 + returns).cumprod()
+    cum = (1 + clean_returns).cumprod()
     dd = (cum - cum.cummax()) / cum.cummax()
     max_dd = dd.min() if not dd.empty else 0.0
 
-    var_95 = np.percentile(returns, 5) if len(returns) > 0 else 0.0
-    cvar_95 = returns[returns <= var_95].mean() if len(returns) > 0 else 0.0
+    var_95 = np.percentile(clean_returns, 5) if len(clean_returns) > 0 else 0.0
+    cvar_95 = clean_returns[clean_returns <= var_95].mean() if len(clean_returns) > 0 else 0.0
 
     beta = 0.0
     if benchmark_returns is not None:
-        aligned = pd.concat([returns, benchmark_returns], axis=1, join='inner').dropna()
+        aligned = pd.concat([clean_returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
             var_bench = np.var(aligned.iloc[:, 1])
@@ -392,7 +403,7 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
             zerolinecolor="rgba(0,0,0,0.15)",
             linecolor="rgba(0,0,0,0.25)",
             tickfont=dict(color="black"),
-            title_font=dict(color="black")
+            title_font=dict(color="black"),
         )
         f.update_yaxes(
             showgrid=True,
@@ -400,7 +411,7 @@ def _force_print_theme(fig: go.Figure) -> go.Figure:
             zerolinecolor="rgba(0,0,0,0.15)",
             linecolor="rgba(0,0,0,0.25)",
             tickfont=dict(color="black"),
-            title_font=dict(color="black")
+            title_font=dict(color="black"),
         )
 
     colorway = px.colors.qualitative.Plotly
@@ -721,13 +732,26 @@ else:
 all_tickers = list(set(tickers_input + [bench_ticker]))
 
 with st.spinner("Fetching market data..."):
-    df_prices = get_market_data(all_tickers, start_date, end_date)
+    # df_prices_buffer já vem com 'auto_adjust=False' e 'Close'
+    df_prices_buffer = get_market_data(all_tickers, start_date, end_date)
 
-if df_prices.empty:
+if df_prices_buffer.empty:
     st.error("No data found.")
     st.stop()
 
-df_ret = df_prices.ffill().pct_change().iloc[1:]
+# 1. Calcula retornos sobre tudo (buffer + periodo)
+df_ret_buffer = df_prices_buffer.ffill().pct_change()
+
+# 2. FILTRO DE DATA RIGOROSO
+# Usamos '>' (maior que) start_date, ao invés de '>='.
+# Isso garante que se start_date=28/01, começamos a contar a partir da variação DO dia 29
+# (Close 29 vs Close 28). Assim, a base de preço é exatamente o fechamento de 28/01.
+mask_date = df_ret_buffer.index > pd.to_datetime(start_date)
+df_ret = df_ret_buffer.loc[mask_date]
+
+if df_ret.empty:
+    st.error("Data range empty after filtering. Check start date vs available data.")
+    st.stop()
 
 bench_ret = df_ret[bench_ticker].copy() if bench_ticker in df_ret.columns else pd.Series(0.0, index=df_ret.index, name="BENCH")
 
@@ -761,7 +785,6 @@ for t in valid_assets:
 # 5. DASHBOARD
 # ==============================================================================
 st.title("Portfolio Risk Management System")
-st.success("✅ **VERSÃO CORRIGIDA**: Rentabilidades calculadas corretamente!")
 
 m_orig = calculate_metrics(ret_orig, rf_input, bench_ret)
 m_sim = calculate_metrics(ret_sim, rf_input, bench_ret)
@@ -823,7 +846,7 @@ with col_delta:
     st.metric("Portfolio Beta", f"{m_sim.get('Beta', 0.0):.2f}", delta=f"{d_beta:.2f}", delta_color="inverse")
 
 # ==============================================================================
-# STRESS TEST
+# --- BLOCO B: STRESS TEST ---
 # ==============================================================================
 STRESS_SCENARIO_NAME = None
 STRESS_BENCH_RES = None
@@ -842,7 +865,8 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
         s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
 
     try:
-        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
+        # Stress Test também usa auto_adjust=False para manter coerência
+        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
         if not df_bench_stress.empty:
             if isinstance(df_bench_stress.columns, pd.MultiIndex):
                 if 'Close' in df_bench_stress.columns:
@@ -869,7 +893,7 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
     df_assets_stress = pd.DataFrame()
     if tickers_input:
         try:
-            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
+            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
             if not raw_assets.empty:
                 if isinstance(raw_assets.columns, pd.MultiIndex):
                     if 'Close' in raw_assets.columns:
@@ -950,13 +974,14 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
         st.warning("Insufficient Benchmark data.")
 
 # ==============================================================================
-# ABAS
+# --- BLOCO C: ABAS ---
 # ==============================================================================
 st.markdown("---")
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["Risk vs Return", "Volatility Quality", "Capture Ratios", "Correlation Matrix", "History", "Portfolio Solver"]
 )
 
+# Guardar objetos para relatório
 FIG_RR_TOTAL = None
 FIG_RR_DOWNSIDE = None
 FIG_VOL_VISUAL = None
@@ -1229,12 +1254,14 @@ st.caption(
 
 if st.button("Generate Full PDF Report", type="primary"):
     with st.spinner("Building report... (requires kaleido + reportlab + Pillow)"):
+        # Tabela principal
         kpi_table_fig = df_to_table_fig(df_comp.reset_index(drop=True), title="Performance Metrics (Main Table)", max_rows=60)
         kpi_png = fig_to_png_bytes(kpi_table_fig)
 
         rr_total_png = fig_to_png_bytes(FIG_RR_TOTAL) if FIG_RR_TOTAL is not None else None
         rr_down_png = fig_to_png_bytes(FIG_RR_DOWNSIDE) if FIG_RR_DOWNSIDE is not None else None
 
+        # Stress Test (fig + texto)
         stress_items = []
         if STRESS_SCENARIO_NAME is None:
             stress_items.append({"type": "text", "value": "Stress Test: não executado."})
@@ -1247,6 +1274,7 @@ if st.button("Generate Full PDF Report", type="primary"):
             if STRESS_SUMMARY_FIG is not None:
                 stress_items.append({"type": "image", "png_bytes": fig_to_png_bytes(STRESS_SUMMARY_FIG)})
 
+        # Volatility Quality (ordem + arredondamento)
         vol_items = []
         if DF_VOL_TABLE is not None and isinstance(DF_VOL_TABLE, pd.DataFrame) and not DF_VOL_TABLE.empty:
             vol_pdf = DF_VOL_TABLE.copy().sort_values("Upside/Down Ratio", ascending=False)
@@ -1271,6 +1299,7 @@ if st.button("Generate Full PDF Report", type="primary"):
         hist_cum_png = fig_to_png_bytes(FIG_HIST_CUM) if FIG_HIST_CUM is not None else None
         hist_dd_png = fig_to_png_bytes(FIG_HIST_DD) if FIG_HIST_DD is not None else None
 
+        # Solver
         solver_items = []
         if SOLVER_OBJECTIVE is not None:
             solver_items.append({"type": "text", "value": f"Objective: {SOLVER_OBJECTIVE}"})
