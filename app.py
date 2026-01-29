@@ -42,8 +42,6 @@ def get_market_data(tickers, start_date, end_date):
         
         # DEFINITIVO: auto_adjust=False
         # Isso garante que pegamos o preço NOMINAL (Preço de Tela).
-        # A rentabilidade será apenas a variação da cota, ignorando dividendos (Yield).
-        # Isso alinha o cálculo com a conta simples (Preço Final / Preço Inicial).
         df = yf.download(
             tickers,
             start=s_date,
@@ -59,7 +57,6 @@ def get_market_data(tickers, start_date, end_date):
         data = pd.DataFrame()
 
         # Seleção explícita da coluna 'Close' (Preço de Tela)
-        # Ignoramos 'Adj Close' propositalmente conforme solicitado
         target_col = 'Close' 
 
         if isinstance(df.columns, pd.MultiIndex):
@@ -110,8 +107,6 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
         return {}
 
     # --- CÁLCULO DE RETORNO "PONTA A PONTA" ---
-    # Matematicamente equivalente a (Preço Final / Preço Inicial) - 1
-    # Usamos o produto acumulado dos retornos diários para chegar nisso.
     cum_prod = (1 + clean_returns).cumprod()
     
     if len(cum_prod) > 0:
@@ -120,13 +115,11 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
         total_return = 0.0
 
     # --- ANUALIZAÇÃO POR DIAS CORRIDOS (CALENDAR DAYS) ---
-    # Resolve o bug de distorção quando faltam dados no Yahoo
     if len(clean_returns) > 1:
         start_ts = clean_returns.index[0]
         end_ts = clean_returns.index[-1]
         days_diff = (end_ts - start_ts).days
         
-        # Se for um período muito curto, evita divisão por zero/erro
         if days_diff < 7:
              years = len(clean_returns) / 252.0
         else:
@@ -873,12 +866,24 @@ STRESS_USED_PROXY = []
 STRESS_SUMMARY_FIG = None
 
 with st.expander("Stress Test Scenarios (Historical)", expanded=False):
-    scenario = st.radio("Select Scenario:", ["COVID-19 Crash (2020)", "Hawkish Cycle (2021-2022)"], horizontal=True)
+    scenario = st.radio("Select Scenario:", 
+                        ["COVID-19 Crash (2020)", 
+                         "Hawkish Cycle (2021-2022)", 
+                         "Flavio Day (05/12/2025)", 
+                         "Bullish Run (2018-2019)"], 
+                        horizontal=True)
     STRESS_SCENARIO_NAME = scenario
 
     if scenario == "COVID-19 Crash (2020)":
         s_start, s_end, period_start, period_end = "2020-01-20", "2020-03-30", "2020-01-23", "2020-03-23"
-    else:
+    elif "Flavio Day" in scenario:
+        # Pega a janela de Dezembro de 2025 (assumindo que 2026 foi erro de digitação pois é futuro)
+        # Rentabilidade de 1 dia: 04/12 fechamento até 05/12 fechamento
+        s_start, s_end, period_start, period_end = "2025-11-20", "2025-12-10", "2025-12-04", "2025-12-05"
+    elif "Bullish Run" in scenario:
+        # 18/06/2018 a 04/02/2019
+        s_start, s_end, period_start, period_end = "2018-06-01", "2019-02-15", "2018-06-18", "2019-02-04"
+    else: # Hawkish
         s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
 
     # Stress Test alinhado com a escolha do usuário (sem ajuste)
@@ -1007,6 +1012,7 @@ FIG_CORR = None
 FIG_HIST_CUM = None
 FIG_HIST_DD = None
 DF_VOL_TABLE = None
+DF_CAPTURE_TABLE = None
 SOLVER_PIE_FIG = None
 SOLVER_TABLE_FIG = None
 SOLVER_OBJECTIVE = None
@@ -1021,9 +1027,14 @@ def _risk_return_fig(mode):
                   "Y": m_orig.get("Retorno Anualizado", 0.0), "Type": "Current Portfolio", "Size": 20})
     _data.append({"Label": f"SIMULATED ({rebal_freq_sim})", "X": m_sim.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
                   "Y": m_sim.get("Retorno Anualizado", 0.0), "Type": "Simulated Portfolio", "Size": 20})
-    _data.append({"Label": "BENCHMARK", "X": m_bench.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0),
-                  "Y": m_bench.get("Retorno Anualizado", 0.0), "Type": "Benchmark", "Size": 12})
-    _fig = px.scatter(pd.DataFrame(_data), x="X", y="Y", color="Type", size="Size", text="Label")
+    
+    # Benchmark - Garantia de Mapeamento Correto
+    bench_x_val = m_bench.get("Volatilidade" if _x_key == "Vol" else "Semi-Desvio", 0.0)
+    bench_y_val = m_bench.get("Retorno Anualizado", 0.0)
+    
+    _data.append({"Label": "BENCHMARK", "X": bench_x_val, "Y": bench_y_val, "Type": "Benchmark", "Size": 12})
+    
+    _fig = px.scatter(pd.DataFrame(_data), x="X", y="Y", color="Type", size="Size", text="Label", hover_data={"Label": True, "X": ":.2%", "Y": ":.2%"})
     _fig.update_layout(xaxis_title=_x_label, yaxis_title="Annualized Return")
     _fig.update_traces(textposition='top center')
     return _fig
@@ -1111,6 +1122,36 @@ with tab3:
     c_data.append({"Label": "SIMULATED", "Up": up_s, "Down": down_s, "Type": "Portfolio"})
 
     df_c = pd.DataFrame(c_data)
+    
+    # --- Nova Tabela de Capture Ratios ---
+    st.markdown("##### Capture Metrics Detail")
+    cap_table_data = []
+    for item in c_data:
+        ratio = item["Up"] / item["Down"] if item["Down"] != 0 else 0.0
+        cap_table_data.append({
+            "Asset": item["Label"],
+            "Up Capture": item["Up"],
+            "Down Capture": item["Down"],
+            "Up/Down Ratio": ratio
+        })
+    
+    if cap_table_data:
+        df_cap_table = pd.DataFrame(cap_table_data)
+        # Ordenar para melhor visualização (quem tem melhor ratio primeiro)
+        df_cap_table = df_cap_table.sort_values("Up/Down Ratio", ascending=False)
+        
+        DF_CAPTURE_TABLE = df_cap_table.copy()
+
+        st.dataframe(
+            df_cap_table.set_index("Asset").style.format({
+                "Up Capture": "{:.2f}",
+                "Down Capture": "{:.2f}",
+                "Up/Down Ratio": "{:.2f}"
+            }),
+            use_container_width=True
+        )
+
+    st.markdown("---")
     fig3 = px.scatter(
         df_c,
         x="Down",
@@ -1318,7 +1359,23 @@ if st.button("Generate Full PDF Report", type="primary"):
         if FIG_VOL_VISUAL is not None:
             vol_items.append({"type": "image", "png_bytes": fig_to_png_bytes(FIG_VOL_VISUAL)})
 
-        capture_png = fig_to_png_bytes(FIG_CAPTURE) if FIG_CAPTURE is not None else None
+        # Capture Ratios (Fig + Tabela)
+        capture_items = []
+        if DF_CAPTURE_TABLE is not None and not DF_CAPTURE_TABLE.empty:
+             cap_table_fig = df_to_table_fig(
+                DF_CAPTURE_TABLE.reset_index(drop=True),
+                title="Capture Metrics Detail",
+                max_rows=60,
+                round_map={"Up Capture": 2, "Down Capture": 2, "Up/Down Ratio": 2}
+            )
+             capture_items.append({"type": "image", "png_bytes": fig_to_png_bytes(cap_table_fig)})
+
+        if FIG_CAPTURE is not None:
+             capture_items.append({"type": "image", "png_bytes": fig_to_png_bytes(FIG_CAPTURE)})
+        
+        if not capture_items:
+             capture_items.append({"type": "text", "value": "Capture Ratios: não disponível."})
+
         corr_png = fig_to_png_bytes(FIG_CORR) if FIG_CORR is not None else None
         hist_cum_png = fig_to_png_bytes(FIG_HIST_CUM) if FIG_HIST_CUM is not None else None
         hist_dd_png = fig_to_png_bytes(FIG_HIST_DD) if FIG_HIST_DD is not None else None
@@ -1350,7 +1407,7 @@ if st.button("Generate Full PDF Report", type="primary"):
             {"title": "Risk vs Return - Total Volatility", "items": [{"type": "image", "png_bytes": rr_total_png}] if rr_total_png else [{"type": "text", "value": "Risk/Return (Total): não disponível."}]},
             {"title": "Risk vs Return - Downside Deviation", "items": [{"type": "image", "png_bytes": rr_down_png}] if rr_down_png else [{"type": "text", "value": "Risk/Return (Downside): não disponível."}]},
             {"title": "Volatility Quality", "items": vol_items},
-            {"title": "Capture Ratios", "items": [{"type": "image", "png_bytes": capture_png}] if capture_png else [{"type": "text", "value": "Capture Ratios: não disponível."}]},
+            {"title": "Capture Ratios", "items": capture_items},
             {"title": "Correlation Matrix", "items": [{"type": "image", "png_bytes": corr_png}] if corr_png else [{"type": "text", "value": "Correlation Matrix: não disponível."}]},
             {"title": "History", "items": (
                 ([{"type": "image", "png_bytes": hist_cum_png}] if hist_cum_png else [{"type": "text", "value": "History (Cumulative): não disponível."}]) +
