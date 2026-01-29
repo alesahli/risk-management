@@ -37,21 +37,19 @@ def get_market_data(tickers, start_date, end_date):
     if not tickers:
         return pd.DataFrame()
     try:
-        # Buffer de segurança: baixamos dados extras para garantir 
-        # que o "Preço Inicial" (Start Date) tenha uma base de comparação anterior.
+        # Buffer de segurança para garantir o "Ontem" do primeiro dia
         s_date = pd.to_datetime(start_date) - timedelta(days=40)
         
-        # DEFINITIVO: auto_adjust=True
-        # O Yahoo Finance ajusta o histórico para Splits e Dividendos. 
-        # Isso é OBRIGATÓRIO para gestão de risco e volatilidade corretas.
-        # Se usarmos False, um split parecerá uma queda de 50% (crash), estragando a Volatilidade.
-        # Com True, o retorno reflete exatamente a performance do gráfico do Yahoo.
+        # DEFINITIVO: auto_adjust=False
+        # Isso garante que pegamos o preço NOMINAL (Preço de Tela).
+        # A rentabilidade será apenas a variação da cota, ignorando dividendos (Yield).
+        # Isso alinha o cálculo com a conta simples (Preço Final / Preço Inicial).
         df = yf.download(
             tickers,
             start=s_date,
             end=end_date,
             progress=False,
-            auto_adjust=True, 
+            auto_adjust=False, 
             threads=False
         )
         
@@ -60,7 +58,8 @@ def get_market_data(tickers, start_date, end_date):
 
         data = pd.DataFrame()
 
-        # Tratamento robusto para extrair apenas a coluna de preços ajustados (Close do auto_adjust)
+        # Seleção explícita da coluna 'Close' (Preço de Tela)
+        # Ignoramos 'Adj Close' propositalmente conforme solicitado
         target_col = 'Close' 
 
         if isinstance(df.columns, pd.MultiIndex):
@@ -71,13 +70,20 @@ def get_market_data(tickers, start_date, end_date):
                 data = df.xs(target_col, axis=1, level=0)
             elif target_col in lvl1:
                 data = df.xs(target_col, axis=1, level=1)
+            # Fallbacks caso 'Close' não exista (raro)
+            elif 'Adj Close' in lvl0:
+                data = df.xs('Adj Close', axis=1, level=0)
+            elif 'Adj Close' in lvl1:
+                data = df.xs('Adj Close', axis=1, level=1)
             else:
-                data = df.iloc[:, 0] # Fallback
+                data = df.iloc[:, 0]
         else:
             if target_col in df.columns:
                 data = df[[target_col]]
+            elif 'Adj Close' in df.columns:
+                data = df[['Adj Close']]
             else:
-                data = df.iloc[:, [0]] # Fallback
+                data = df.iloc[:, [0]]
 
         if isinstance(data, pd.Series):
             data = data.to_frame()
@@ -103,10 +109,9 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     if clean_returns.empty:
         return {}
 
-    # --- CORREÇÃO DEFINITIVA DE RETORNO ---
-    # Para garantir (Preço Final / Preço Inicial) - 1:
-    # Calculamos o produto acumulado dos retornos diários (+1) e pegamos o último valor.
-    # Isso é matematicamente equivalente a dividir o preço do último dia pelo preço base.
+    # --- CÁLCULO DE RETORNO "PONTA A PONTA" ---
+    # Matematicamente equivalente a (Preço Final / Preço Inicial) - 1
+    # Usamos o produto acumulado dos retornos diários para chegar nisso.
     cum_prod = (1 + clean_returns).cumprod()
     
     if len(cum_prod) > 0:
@@ -114,12 +119,14 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     else:
         total_return = 0.0
 
-    # --- ANUALIZAÇÃO POR DIAS CORRIDOS ---
+    # --- ANUALIZAÇÃO POR DIAS CORRIDOS (CALENDAR DAYS) ---
+    # Resolve o bug de distorção quando faltam dados no Yahoo
     if len(clean_returns) > 1:
         start_ts = clean_returns.index[0]
         end_ts = clean_returns.index[-1]
         days_diff = (end_ts - start_ts).days
         
+        # Se for um período muito curto, evita divisão por zero/erro
         if days_diff < 7:
              years = len(clean_returns) / 252.0
         else:
@@ -132,7 +139,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     else:
         ann_return = total_return
 
-    # Volatilidade e Risco (Sempre base 252 dias úteis padrão de mercado)
+    # Métricas de Risco (Volatilidade e Sharpe usam base 252 padrão)
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
     ann_vol = clean_returns.std() * np.sqrt(252)
 
@@ -155,7 +162,6 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
 
     beta = 0.0
     if benchmark_returns is not None:
-        # Join inner para garantir que o Beta seja calculado apenas em dias coincidentes
         aligned = pd.concat([clean_returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
@@ -203,11 +209,9 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     w_cash_initial = cash_pct / 100.0
 
     if rebal_freq == 'Diário':
-        # Cálculo vetorizado rápido para rebalanceamento diário (mantém pesos fixos)
         gross_ret = asset_returns.fillna(0.0).dot(initial_weights) + (rf_daily * w_cash_initial)
         return gross_ret - fee_daily
 
-    # Lógica de Drift (pesos flutuam)
     rebal_dates = set()
     if rebal_freq != 'Sem Rebalanceamento':
         try:
@@ -740,8 +744,8 @@ else:
 # ==============================================================================
 all_tickers = list(set(tickers_input + [bench_ticker]))
 
-with st.spinner("Fetching market data (Auto Adjusted for Splits/Divs)..."):
-    # Dados com buffer de segurança e ajuste automático (Performance Chart Style)
+with st.spinner("Fetching market data (Close Nominal)..."):
+    # Dados com buffer e auto_adjust=False para pegar preço nominal (de tela)
     df_prices_buffer = get_market_data(all_tickers, start_date, end_date)
 
 if df_prices_buffer.empty:
@@ -752,8 +756,7 @@ if df_prices_buffer.empty:
 df_ret_buffer = df_prices_buffer.ffill().pct_change()
 
 # 2. Filtro de Data Preciso
-# A lógica aqui é garantir que o retorno acumulado comece no dia SEGUINTE ao start_date,
-# usando o fechamento do start_date como base 1.0.
+# Garantimos que a série começa na data escolhida pelo usuário
 mask_date = df_ret_buffer.index > pd.to_datetime(start_date)
 df_ret = df_ret_buffer.loc[mask_date]
 
@@ -761,8 +764,7 @@ if df_ret.empty:
     st.error("Data range empty after filtering. Check start date vs available data.")
     st.stop()
 
-# CORREÇÃO BENCHMARK:
-# Extrai o benchmark e garante que ele existe, alinhado ao mesmo índice
+# Extrai o benchmark (se existir)
 if bench_ticker in df_ret.columns:
     bench_ret = df_ret[bench_ticker].copy()
 else:
@@ -879,9 +881,9 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
     else:
         s_start, s_end, period_start, period_end = "2021-06-01", "2022-07-25", "2021-06-08", "2022-07-18"
 
-    # No Stress Test, também usamos auto_adjust=True para capturar a real queda do mercado
+    # Stress Test alinhado com a escolha do usuário (sem ajuste)
     try:
-        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
+        df_bench_stress = yf.download(bench_ticker, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
         if not df_bench_stress.empty:
             if isinstance(df_bench_stress.columns, pd.MultiIndex):
                 if 'Close' in df_bench_stress.columns:
@@ -908,7 +910,7 @@ with st.expander("Stress Test Scenarios (Historical)", expanded=False):
     df_assets_stress = pd.DataFrame()
     if tickers_input:
         try:
-            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=True, threads=False)
+            raw_assets = yf.download(tickers_input, start=s_start, end=s_end, progress=False, auto_adjust=False, threads=False)
             if not raw_assets.empty:
                 if isinstance(raw_assets.columns, pd.MultiIndex):
                     if 'Close' in raw_assets.columns:
@@ -1136,22 +1138,22 @@ with tab4:
 
 with tab5:
     # --- CORREÇÃO DO GRÁFICO DE HISTÓRICO ---
-    # Alinha todos os dados em um único DataFrame antes de calcular acumulado
-    # Isso resolve o problema visual do Benchmark desalinhado ou quebrado
-    df_chart = pd.concat([
-        ret_orig.rename("Current (Fixed)"),
-        ret_sim.rename(f"Simulated ({rebal_freq_sim})"),
-        bench_ret.rename("Benchmark")
-    ], axis=1)
+    # Alinhamento pelo índice do DataFrame principal (df_ret)
+    # Garante que todos (Portfolio, Sim e Bench) compartilhem o mesmo eixo X sem buracos
+    
+    # 1. Cria DataFrame unificado
+    df_chart = pd.DataFrame(index=df_ret.index)
+    df_chart["Current (Fixed)"] = ret_orig
+    df_chart[f"Simulated ({rebal_freq_sim})"] = ret_sim
+    df_chart["Benchmark"] = bench_ret
 
-    # Preenche buracos de dias sem negociação (ex: feriados diferentes) para o gráfico
+    # 2. Preenche eventuais buracos de dados faltantes com 0.0 (sem retorno no dia)
     df_chart = df_chart.fillna(0.0)
     
-    # Calcula Acumulado
+    # 3. Calcula Acumulado
     df_cum_chart = (1 + df_chart).cumprod()
     
-    # Normaliza para começar em 1.0 (ou 0%) no dia inicial
-    # Se o primeiro dia já tiver variação, normalizamos pela base 1.
+    # 4. Normaliza para base 1.0
     df_cum_chart = df_cum_chart / df_cum_chart.iloc[0]
 
     st.line_chart(df_cum_chart)
