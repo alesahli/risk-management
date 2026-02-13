@@ -250,25 +250,30 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     return pd.Series(portfolio_rets, index=dates)
 
 
-def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0, target_semidev_val=None, max_assets=20, div_penalty_weight=0.2, min_weight_threshold=0.03):
+def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0, target_semidev_val=None, min_assets=10, max_assets=20, div_penalty_weight=0.2):
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
     fee_daily = (1 + mgmt_fee_annual / 100.0) ** (1 / 252) - 1
     asset_names = df_returns.columns.tolist()
     df_cleaned = df_returns.fillna(0.0)
     corr_matrix = df_cleaned.corr().fillna(0.0).values
 
-    # IMPORTANTE: Forçamos o limite inferior para 0 no otimizador para permitir descarte
-    # Mas guardamos o 'min_weight' desejado para a penalidade
+    # IMPORTANTE: Forçamos o limite inferior para 0 na tabela interna para permitir o descarte
+    # A penalidade de "Min %" agora é cuidada pela lógica de objetivo
     actual_bounds = [(0.0, b[1]) for b in bounds]
     
-    # Guess inicial: foca no caixa se a taxa for absurda
-    initial_guess = np.array([0.0] * len(asset_names))
-    if "CASH" in asset_names:
-        initial_guess[asset_names.index("CASH")] = 1.0
-    else:
-        initial_guess = np.array([1.0/len(asset_names)] * len(asset_names))
+    # Guess inicial equilibrado
+    initial_guess = np.array([1.0/len(asset_names)] * len(asset_names))
 
     constraints = [{'type': 'eq', 'fun': lambda x: np.sum(x) - 1.0}]
+
+    if target_metric == "Max Return (Target Semi-Dev)" and target_semidev_val is not None:
+        def semidev_constraint(weights):
+            w = np.array(weights, dtype=float)
+            net = df_cleaned.dot(w) - fee_daily
+            neg = net[net < 0]
+            current_semi = neg.std() * np.sqrt(252) if len(neg) > 1 else 0.0
+            return (target_semidev_val / 100.0) - current_semi
+        constraints.append({'type': 'ineq', 'fun': semidev_constraint})
 
     def objective(weights):
         w = np.array(weights, dtype=float)
@@ -279,7 +284,6 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
         if target_metric == "Max Sortino":
             neg = net_ret[net_ret < 0]
             excess = net_ret.mean() - rf_daily
-            # Se a taxa RF for 200%, o excesso será muito negativo, o solver buscará o "menos pior"
             sortino = (excess / neg.std()) * np.sqrt(252) if (not neg.empty and neg.std() > 0) else -100.0
             res = -sortino 
         elif target_metric == "Min Downside Volatility":
@@ -288,20 +292,22 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
         elif target_metric == "Max Return (Target Semi-Dev)":
             res = -((1 + ((1 + net_ret).prod() - 1)) ** (252 / len(net_ret)) - 1)
 
-        # 2. PENALIDADE DE CARDINALIDADE (PESADA)
+        # 2. CARDINALIDADE (Min e Max de Ações - Ignorando Caixa)
         stock_indices = [i for i, name in enumerate(asset_names) if name != "CASH"]
-        w_stocks = w[stock_indices]
-        active_stocks = np.sum(w_stocks > 0.005)
+        active_stocks = np.sum(w[stock_indices] > 0.005) # Ativos com > 0.5%
+        
+        # Penalidade pesada para sair do intervalo
         if active_stocks > max_assets:
-            res += (active_stocks - max_assets) * 50.0 # Multa drástica para forçar exclusão
+            res += (active_stocks - max_assets) * 100.0
+        if active_stocks < min_assets:
+            res += (min_assets - active_stocks) * 100.0
 
-        # 3. PENALIDADE DE "ZONA PROIBIDA" (Semi-continuidade)
-        # Se o ativo estiver entre 0.01% e o Min Weight desejado, penalizamos muito
+        # 3. PENALIDADE DE "NO-MAN'S LAND"
+        # Garante que se o ativo for escolhido, ele respeite o Min % original da tabela
         for i in stock_indices:
-            # Pegamos o mínimo original que estava na tabela (passado via min_weight_threshold ou bounds)
             m_weight = bounds[i][0]
             if 0.001 < w[i] < m_weight:
-                res += (m_weight - w[i]) * 100.0
+                res += (m_weight - w[i]) * 50.0
 
         if div_penalty_weight > 0:
             res += div_penalty_weight * np.dot(w.T, np.dot(corr_matrix, w))
@@ -1208,92 +1214,82 @@ with tab5:
     FIG_HIST_DD = fig_dd
 
 with tab6:
-    st.markdown("### 🛠️ Central de Otimização Tática")
-    st.caption("Configure as restrições do seu mandato e execute o solver para encontrar a fronteira de mínima volatilidade ou máximo Sortino.")
-
-    # Preparação de dados para o solver (Benchmark e Caixa)
+    st.markdown("### 🛠️ Portfolio Optimization")
+    
     rf_daily_opt = (1 + rf_input / 100.0) ** (1 / 252) - 1
     cash_series = pd.Series(rf_daily_opt, index=assets_ret.index, name="CASH")
     df_opt = pd.concat([assets_ret, cash_series], axis=1)
     opt_assets_list = df_opt.columns.tolist()
 
-    # Layout de colunas: Configuração à esquerda, Resultados à direita
-    col_setup, col_res = st.columns([1.2, 2])
-
+    col_setup, col_res = st.columns([1, 2])
     with col_setup:
-        st.subheader("⚙️ Parâmetros do Mandato")
+        target_obj = st.selectbox("Objective Function:", ["Min Downside Volatility", "Max Sortino", "Max Return (Target Semi-Dev)"])
         
-        target_obj = st.selectbox(
-            "Função Objetivo:", 
-            ["Min Downside Volatility", "Max Sortino", "Max Return (Target Semi-Dev)"],
-            help="Escolha o critério principal de otimização."
-        )
-        
-        # --- Controles de Cardinalidade e Diversificação ---
-        c1, c2 = st.columns(2)
+        # --- Novos Controles de Cardinalidade ---
         n_stocks_avail = len([t for t in opt_assets_list if t != "CASH"])
-        max_assets_input = c1.number_input(
-            "Qtd. Máxima de Ações", 
-            1, n_stocks_avail, min(15, n_stocks_avail),
-            help="Limite de quantos ativos (excluindo caixa) podem ter peso na carteira."
-        )
+        c_q1, c_q2 = st.columns(2)
+        min_qty = c_q1.number_input("Qtd. Mínima de Ações", 1, n_stocks_avail, min(10, n_stocks_avail))
+        max_qty = c_q2.number_input("Qtd. Máxima de Ações", 1, n_stocks_avail, min(20, n_stocks_avail))
         
-        div_factor = c2.slider(
-            "Fator Diversificação", 
-            0.0, 1.0, 0.2,
-            help="Aumente para forçar o solver a escolher ativos com correlação baixa."
-        )
-
-        target_semidev_input = None
-        if target_obj == "Max Return (Target Semi-Dev)":
-            target_semidev_input = st.number_input("Target Downside Volatility (%)", value=5.0, step=0.5)
+        div_factor = st.slider("Fator Diversificação (Correlação)", 0.0, 1.0, 0.2)
+        
+        t_v_input = st.number_input("Target Semi-Dev %", 5.0) if target_obj == "Max Return (Target Semi-Dev)" else None
 
         st.markdown("---")
-        st.subheader("📋 Restrições de Peso (Bounds)")
-        
-        # Sugestão de preenchimento global para agilizar
-        st.caption("Preencha aqui para atualizar a tabela abaixo em massa:")
+        st.subheader("📋 Constraints Globais")
         cg1, cg2 = st.columns(2)
-        val_min_global = cg1.number_input("Min por Ativo %", value=3.0, step=0.5)
-        val_max_global = cg2.number_input("Max por Ativo %", value=10.0, step=0.5)
+        g_min = cg1.number_input("Min por Ativo %", value=3.0)
+        g_max = cg2.number_input("Max por Ativo %", value=10.0)
         
-        # DataFrame de configuração da tabela
         df_bounds_setup = pd.DataFrame({
             "Asset": opt_assets_list, 
-            "Min %": [val_min_global if a != "CASH" else 0.0 for a in opt_assets_list], 
-            "Max %": [val_max_global if a != "CASH" else 100.0 for a in opt_assets_list]
+            "Min %": [g_min if a != "CASH" else 0.0 for a in opt_assets_list], 
+            "Max %": [g_max if a != "CASH" else 100.0 for a in opt_assets_list]
         })
-        
-        # Tabela editável para o ajuste fino (Individual)
-        edited_bounds = st.data_editor(
-            df_bounds_setup, 
-            hide_index=True, 
-            use_container_width=True,
-            column_config={
-                "Min %": st.column_config.NumberColumn(format="%.1f%%"),
-                "Max %": st.column_config.NumberColumn(format="%.1f%%")
-            }
-        )
+        edited_bounds = st.data_editor(df_bounds_setup, hide_index=True)
 
-        if st.button("🚀 Executar Solver", type="primary", use_container_width=True):
-            # Convertemos os percentuais da tabela para decimais para o Solver
-            b_tuple = [(float(r["Min %"])/100, float(r["Max %"])/100) for _, r in edited_bounds.iterrows()]
-            
-            with st.spinner("Calculando Alocação Ótima..."):
+        if st.button("🚀 Run Solver", type="primary", use_container_width=True):
+            bounds_param = [(float(r["Min %"])/100, float(r["Max %"])/100) for _, r in edited_bounds.iterrows()]
+            with st.spinner("Otimizando conforme mandato..."):
                 res_final = run_solver(
-                    df_opt, rf_input, b_tuple, target_obj, mgmt_fee, 
-                    target_semidev_input, max_assets_input, div_factor
+                    df_opt, rf_input, bounds_param, target_obj, mgmt_fee, 
+                    t_v_input, min_qty, max_qty, div_factor
                 )
-                
-                # Salvamos no estado da sessão para persistir a visualização
                 st.session_state['sol_data'] = {
-                    'success': res_final.success,
-                    'message': res_final.message,
-                    'weights': res_final.x,
-                    'assets': opt_assets_list,
-                    'obj': target_obj,
-                    'ts': datetime.now()
+                    'success': res_final.success, 'message': res_final.message,
+                    'weights': res_final.x, 'assets': opt_assets_list, 'obj': target_obj
                 }
+
+    with col_res:
+        if 'sol_data' in st.session_state:
+            sd = st.session_state['sol_data']
+            if sd['success']:
+                w_res, a_res = sd['weights'], sd['assets']
+                df_w_final = pd.DataFrame({"Asset": a_res, "Weight %": w_res * 100})
+                df_w_final = df_w_final[df_w_final["Weight %"] > 0.05].sort_values("Weight %", ascending=False)
+                
+                st.subheader(f"📊 Resultado: {sd['obj']}")
+                k1, k2, k3, k4 = st.columns(4)
+                # Cálculos rápidos para o display
+                opt_ret_series = df_opt.fillna(0.0).dot(w_res) - (mgmt_fee/100/252)
+                m_opt = calculate_metrics(opt_ret_series, rf_input, bench_ret)
+                
+                k1.metric("Retorno An.", f"{m_opt.get('Retorno Anualizado', 0.0):.2%}")
+                k2.metric("Sortino", f"{m_opt.get('Sortino', 0.0):.2f}")
+                k3.metric("Downside Vol", f"{m_opt.get('Semi-Desvio', 0.0):.2%}")
+                k4.metric("Ativos", f"{np.sum(w_res > 0.005)}")
+                
+                c_p, c_t = st.columns([1.5, 1])
+                with c_p: st.plotly_chart(px.pie(df_w_final, values="Weight %", names="Asset", hole=0.4), use_container_width=True)
+                with c_t: st.dataframe(df_w_final.style.format({"Weight %": "{:.2f}%"}), hide_index=True)
+                
+                if st.button("✅ Aplicar à Simulação", use_container_width=True):
+                    for _, r in df_w_final.iterrows():
+                        if r['Asset'] != "CASH": st.session_state[f"sim_{r['Asset']}"] = round(r['Weight %'], 2)
+                    st.session_state['rebal_freq_key'] = "Diário"
+                    st.rerun()
+            else:
+                st.error(f"Erro no Solver: {sd['message']}")
 
     with col_res:
         if 'sol_data' in st.session_state:
@@ -1560,6 +1556,7 @@ if st.button("Generate Full PDF Report", type="primary"):
     )
 
 st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
+
 
 
 
