@@ -253,24 +253,22 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
 def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0, target_semidev_val=None, max_assets=20, div_penalty_weight=0.2):
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
     fee_daily = (1 + mgmt_fee_annual / 100.0) ** (1 / 252) - 1
-    num_assets = len(df_returns.columns)
     asset_names = df_returns.columns.tolist()
     corr_matrix = df_returns.corr().values
 
     lower_bounds = np.array([b[0] for b in bounds], dtype=float)
     upper_bounds = np.array([b[1] for b in bounds], dtype=float)
-
+    
+    # Guess inicial equilibrado e normalizado
     initial_guess = (lower_bounds + upper_bounds) / 2.0
-    sum_guess = np.sum(initial_guess)
-    initial_guess = initial_guess / sum_guess if sum_guess > 0 else np.array([1 / num_assets] * num_assets)
+    initial_guess /= np.sum(initial_guess)
 
     constraints = [{'type': 'eq', 'fun': lambda x: np.sum(x) - 1.0}]
 
     if target_metric == "Max Return (Target Semi-Dev)" and target_semidev_val is not None:
         def semidev_constraint(weights):
             w = np.array(weights, dtype=float)
-            gross = df_returns.fillna(0.0).dot(w)
-            net = gross - fee_daily
+            net = df_returns.fillna(0.0).dot(w) - fee_daily
             neg = net[net < 0]
             current_semi = neg.std() * np.sqrt(252) if len(neg) > 1 else 0.0
             return (target_semidev_val / 100.0) - current_semi
@@ -279,13 +277,16 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
     def objective(weights):
         w = np.array(weights, dtype=float)
         net_ret = df_returns.fillna(0.0).dot(w) - fee_daily
-
+        
         # 1. MÉTRICA BASE
         res = 0.0
         if target_metric == "Max Sortino":
             neg = net_ret[net_ret < 0]
-            if neg.empty or neg.std() == 0: return 1e5
-            res = -((net_ret - rf_daily).mean() / neg.std()) * np.sqrt(252)
+            if neg.empty or neg.std() == 0: 
+                # Retorna um custo alto, mas suave, em vez de 1e6
+                res = 10.0 
+            else:
+                res = -((net_ret - rf_daily).mean() / neg.std()) * np.sqrt(252)
         elif target_metric == "Min Downside Volatility":
             neg = net_ret[net_ret < 0]
             res = neg.std() * np.sqrt(252) if not neg.empty else 0.0
@@ -293,19 +294,26 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
             total_ret = (1 + net_ret).prod() - 1
             res = -((1 + total_ret) ** (252 / len(net_ret)) - 1)
 
-        # 2. PENALIDADE DE CORRELAÇÃO (DIVERSIFICAÇÃO)
+        # 2. PENALIDADE DE CORRELAÇÃO (Suavizada)
+        # Nota: 1.0 é a penalidade MÁXIMA. Para "ignorar", use 0.0.
         if div_penalty_weight > 0:
             res += div_penalty_weight * np.dot(w.T, np.dot(corr_matrix, w))
 
-        # 3. PENALIDADE DE CARDINALIDADE (IGNORANDO CASH)
+        # 3. CARDINALIDADE CONTÍNUA (IGNORANDO CASH)
+        # Em vez de contar (degrau), penalizamos a soma dos menores pesos (rampa)
         stock_indices = [i for i, name in enumerate(asset_names) if name != "CASH"]
-        active_stocks = np.sum(w[stock_indices] > 0.008) # Considera ativos > 0.8%
-        if active_stocks > max_assets:
-            res += (active_stocks - max_assets) * 5.0 # Penalidade para forçar descarte
+        w_stocks = w[stock_indices]
+        
+        if len(w_stocks) > max_assets:
+            sorted_weights = np.sort(w_stocks)
+            num_to_zero = len(w_stocks) - max_assets
+            # Penaliza a existência de pesos nos ativos excedentes
+            res += np.sum(sorted_weights[:num_to_zero]) * 50.0 
 
         return res
 
-    result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-6)
+    # Aumentamos a tolerância para facilitar a convergência com cardinalidade
+    result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-4)
     return result
 
 
@@ -1442,3 +1450,4 @@ if st.button("Generate Full PDF Report", type="primary"):
     )
 
 st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
+
