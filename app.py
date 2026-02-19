@@ -106,7 +106,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     if clean_returns.empty:
         return {}
 
-    # --- CÁLCULO DE RETORNO "PONTA A PONTA" ---
+    # --- CÁLCULO DE RETORNO "PONTA A PONTA" (MANTIDO) ---
     cum_prod = (1 + clean_returns).cumprod()
     
     if len(cum_prod) > 0:
@@ -114,7 +114,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     else:
         total_return = 0.0
 
-    # --- ANUALIZAÇÃO POR DIAS CORRIDOS (CALENDAR DAYS) ---
+    # --- ANUALIZAÇÃO POR DIAS CORRIDOS (MANTIDO) ---
     if len(clean_returns) > 1:
         start_ts = clean_returns.index[0]
         end_ts = clean_returns.index[-1]
@@ -132,7 +132,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     else:
         ann_return = total_return
 
-    # Métricas de Risco (Volatilidade e Sharpe usam base 252 padrão)
+    # Métricas de Risco (MANTIDO)
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
     ann_vol = clean_returns.std() * np.sqrt(252)
 
@@ -153,13 +153,23 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
     var_95 = np.percentile(clean_returns, 5) if len(clean_returns) > 0 else 0.0
     cvar_95 = clean_returns[clean_returns <= var_95].mean() if len(clean_returns) > 0 else 0.0
 
+    # --- BETA E INFORMATION RATIO (ATUALIZADO) ---
     beta = 0.0
+    ir = 0.0
     if benchmark_returns is not None:
         aligned = pd.concat([clean_returns, benchmark_returns], axis=1, join='inner').dropna()
         if not aligned.empty and aligned.shape[0] > 10:
+            # Cálculo do Beta (MANTIDO)
             cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
             var_bench = np.var(aligned.iloc[:, 1])
             beta = cov / var_bench if var_bench != 0 else 0.0
+            
+            # Cálculo do Information Ratio (ADICIONADO)
+            # Retorno Ativo = Retorno Carteira - Retorno Benchmark
+            active_ret = aligned.iloc[:, 0] - aligned.iloc[:, 1]
+            tracking_error = active_ret.std() * np.sqrt(252)
+            if tracking_error != 0:
+                ir = (active_ret.mean() * 252) / tracking_error
 
     return {
         "Retorno do Período": float(total_return),
@@ -170,6 +180,7 @@ def calculate_metrics(returns, rf_annual, benchmark_returns=None):
         "Beta": float(beta) if pd.notna(beta) else 0.0,
         "Sharpe": float(sharpe) if pd.notna(sharpe) else 0.0,
         "Sortino": float(sortino) if pd.notna(sortino) else 0.0,
+        "Information Ratio": float(ir) if pd.notna(ir) else 0.0,
         "Max Drawdown": float(max_dd) if pd.notna(max_dd) else 0.0,
         "VaR 95%": float(var_95) if pd.notna(var_95) else 0.0,
         "CVaR 95%": float(cvar_95) if pd.notna(cvar_95) else 0.0
@@ -807,7 +818,7 @@ with col_kpi:
 
     metrics_order = [
         "Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio",
-        "Beta", "Sharpe", "Sortino", "Max Drawdown", "VaR 95%", "CVaR 95%"
+        "Beta", "Sharpe", "Sortino", ""Information Ratio", "Max Drawdown", "VaR 95%", "CVaR 95%"
     ]
     keys_present = [k for k in metrics_order if k in m_orig]
 
@@ -1443,3 +1454,4 @@ if st.button("Generate Full PDF Report", type="primary"):
     )
 
 st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
+
