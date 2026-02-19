@@ -818,7 +818,7 @@ with col_kpi:
 
     metrics_order = [
         "Retorno do Período", "Retorno Anualizado", "Volatilidade", "Semi-Desvio",
-        "Beta", "Sharpe", "Sortino", ""Information Ratio", "Max Drawdown", "VaR 95%", "CVaR 95%"
+        "Beta", "Sharpe", "Sortino", "Information Ratio", "Max Drawdown", "VaR 95%", "CVaR 95%"
     ]
     keys_present = [k for k in metrics_order if k in m_orig]
 
@@ -1454,4 +1454,5 @@ if st.button("Generate Full PDF Report", type="primary"):
     )
 
 st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
+
 
