@@ -261,11 +261,15 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     return pd.Series(portfolio_rets, index=dates)
 
 
-def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0, target_semidev_val=None):
+def run_solver(df_returns, rf_annual, bounds, target_metric, benchmark_returns=None, mgmt_fee_annual=0.0, target_semidev_val=None):
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
     fee_daily = (1 + mgmt_fee_annual / 100.0) ** (1 / 252) - 1
 
     num_assets = len(df_returns.columns)
+
+    # Alinhamento do benchmark para o cálculo do Active Sortino
+    if benchmark_returns is not None:
+        benchmark_returns = benchmark_returns.reindex(df_returns.index).fillna(0.0)
 
     lower_bounds = np.array([b[0] for b in bounds], dtype=float)
     upper_bounds = np.array([b[1] for b in bounds], dtype=float)
@@ -302,6 +306,22 @@ def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0
             excess_ret = net_ret - rf_daily
             sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252)
             return -sortino
+
+        elif target_metric == "Max Active Sortino":
+            if benchmark_returns is None:
+                return 1e5 # Retorna penalidade se o benchmark não for fornecido
+            
+            # Cálculo do Alpha diário
+            active_ret = net_ret - benchmark_returns
+            # Filtra apenas os dias de subperformance (Alpha < 0)
+            neg_active = active_ret[active_ret < 0]
+            
+            if neg_active.empty or neg_active.std() == 0:
+                return 1e5
+            
+            # Active Sortino Ratio: Alpha Médio / Downside Tracking Error
+            active_sortino = (active_ret.mean() / neg_active.std()) * np.sqrt(252)
+            return -active_sortino
 
         elif target_metric == "Min Downside Volatility":
             neg_ret = net_ret[net_ret < 0]
@@ -1238,7 +1258,9 @@ with tab6:
     col_setup, col_res = st.columns([1, 2])
 
     with col_setup:
-        target_obj = st.selectbox("Objective Function:", ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)"])
+        target_obj = st.selectbox("Objective Function:", ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)", "Max Active Sortino"],
+    help="O Active Sortino otimiza o Alpha em relação ao risco de subperformance perante o benchmark."
+)
 
         target_semidev_input = None
         if target_obj == "Max Return (Target Semi-Dev)":
@@ -1454,5 +1476,6 @@ if st.button("Generate Full PDF Report", type="primary"):
     )
 
 st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
+
 
 
