@@ -261,72 +261,73 @@ def calculate_flexible_portfolio(asset_returns, weights_dict, cash_pct, rf_annua
     return pd.Series(portfolio_rets, index=dates)
 
 
-def run_solver(df_returns, rf_annual, bounds, target_metric, benchmark_returns=None, mgmt_fee_annual=0.0, target_semidev_val=None):
-    # Converte taxas anuais para diárias
+def run_solver(df_returns, rf_annual, bounds, target_metric, mgmt_fee_annual=0.0, target_semidev_val=None):
     rf_daily = (1 + rf_annual / 100.0) ** (1 / 252) - 1
     fee_daily = (1 + mgmt_fee_annual / 100.0) ** (1 / 252) - 1
 
     num_assets = len(df_returns.columns)
 
-    # Alinha o benchmark com os dados de retorno para evitar erros de índice
-    if benchmark_returns is not None:
-        benchmark_returns = benchmark_returns.reindex(df_returns.index).fillna(0.0)
-
-    # Configuração inicial do solver (Manteve sua lógica simples sem cardinalidade)
     lower_bounds = np.array([b[0] for b in bounds], dtype=float)
     upper_bounds = np.array([b[1] for b in bounds], dtype=float)
+
     initial_guess = (lower_bounds + upper_bounds) / 2.0
     sum_guess = np.sum(initial_guess)
     initial_guess = initial_guess / sum_guess if sum_guess > 0 else np.array([1 / num_assets] * num_assets)
 
     constraints = [{'type': 'eq', 'fun': lambda x: np.sum(x) - 1.0}]
 
-    # Restrição para Target Semi-Dev (se selecionado)
     if target_metric == "Max Return (Target Semi-Dev)" and target_semidev_val is not None:
         def semidev_constraint(weights):
             w = np.array(weights, dtype=float)
-            net = df_returns.fillna(0.0).dot(w) - fee_daily
+            gross = df_returns.fillna(0.0).dot(w)
+            net = gross - fee_daily
             neg = net[net < 0]
             current_semi = neg.std() * np.sqrt(252) if len(neg) > 1 else 0.0
             return (target_semidev_val / 100.0) - current_semi
+
         constraints.append({'type': 'ineq', 'fun': semidev_constraint})
 
     def objective(weights):
         w = np.array(weights, dtype=float)
-        net_ret = df_returns.fillna(0.0).dot(w) - fee_daily
+        gross_ret = df_returns.fillna(0.0).dot(w)
+        net_ret = gross_ret - fee_daily
 
-        if abs(np.sum(w) - 1.0) > 0.001: return 1e5
+        if abs(np.sum(w) - 1.0) > 0.001:
+            return 1e5
 
-        # --- MÉTRICA 1: SORTINO TRADICIONAL ---
         if target_metric == "Max Sortino":
             neg_ret = net_ret[net_ret < 0]
-            if neg_ret.empty or neg_ret.std() == 0: return 1e5
+            if neg_ret.empty or neg_ret.std() == 0:
+                return 1e5
             excess_ret = net_ret - rf_daily
             sortino = (excess_ret.mean() / neg_ret.std()) * np.sqrt(252)
             return -sortino
 
-        # --- MÉTRICA 2: ACTIVE SORTINO (Information Ratio do Downside) ---
-        elif target_metric == "Max Active Sortino":
-            if benchmark_returns is None: return 1e5
-            active_ret = net_ret - benchmark_returns # Alpha
-            neg_active = active_ret[active_ret < 0] # Subperformance
-            if neg_active.empty or neg_active.std() == 0: return 1e5
-            active_sortino = (active_ret.mean() / neg_active.std()) * np.sqrt(252)
-            return -active_sortino
-
         elif target_metric == "Min Downside Volatility":
             neg_ret = net_ret[net_ret < 0]
-            return neg_ret.std() * np.sqrt(252) if not neg_ret.empty else 0.0
+            if neg_ret.empty:
+                return 0.0
+            semi_dev = neg_ret.std() * np.sqrt(252)
+            return semi_dev
 
         elif target_metric == "Max Return (Target Semi-Dev)":
-            if len(net_ret) < 2: return 1e5
-            ann_ret = (1 + (1 + net_ret).prod() - 1) ** (252 / len(net_ret)) - 1
+            if len(net_ret) < 2:
+                return 1e5
+            total_ret = (1 + net_ret).prod() - 1
+            ann_ret = (1 + total_ret) ** (252 / len(net_ret)) - 1
             return -ann_ret
 
         return 1e5
 
-    result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds,
-                      constraints=constraints, tol=1e-6, options={'maxiter': 1000})
+    result = minimize(
+        objective,
+        initial_guess,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        tol=1e-6,
+        options={'maxiter': 1000}
+    )
     return result
 
 
@@ -1237,10 +1238,7 @@ with tab6:
     col_setup, col_res = st.columns([1, 2])
 
     with col_setup:
-        target_obj = target_obj = st.selectbox(
-    "Objective Function:", 
-    ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)", "Max Active Sortino"]
-)
+        target_obj = st.selectbox("Objective Function:", ["Max Sortino", "Min Downside Volatility", "Max Return (Target Semi-Dev)"])
 
         target_semidev_input = None
         if target_obj == "Max Return (Target Semi-Dev)":
@@ -1252,16 +1250,17 @@ with tab6:
         )
 
         if st.button("Run Solver", type="primary"):
-    with st.spinner("Otimizando..."):
-        res = run_solver(
-            df_returns=df_opt, 
-            rf_annual=rf_input, 
-            bounds=bounds, 
-            target_metric=target_obj,
-            benchmark_returns=bench_ret, # Certifique-se que esta variável existe!
-            mgmt_fee_annual=mgmt_fee,
-            target_semidev_val=target_semidev_input
-        )
+            bounds = [(float(r["Min %"]) / 100.0, float(r["Max %"]) / 100.0) for _, r in edited_df.iterrows()]
+            with st.spinner("Optimizing..."):
+                res = run_solver(df_opt, rf_input, bounds, target_obj, mgmt_fee, target_semidev_input)
+
+            st.session_state['solver_result'] = {
+                'success': bool(res.success),
+                'message': str(res.message),
+                'weights': res.x,
+                'opt_assets': opt_assets,
+                'target_obj': target_obj
+            }
 
     with col_res:
         if 'solver_result' in st.session_state and st.session_state['solver_result']['success']:
@@ -1455,7 +1454,6 @@ if st.button("Generate Full PDF Report", type="primary"):
     )
 
 st.info("Dependências para exportar imagens do Plotly em PDF: `kaleido`, `reportlab`, `Pillow` (adicione no requirements.txt).")
-
 
 
 
